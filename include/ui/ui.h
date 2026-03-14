@@ -21,22 +21,6 @@
 #define UI_H
 
 /*
-    Header Injections
-    Must be definied before any inclusion
-*/
-
-typedef ui_box_style ui_box_style;
-
-typedef ui_img_source ui_img_source;
-typedef ui_img_style  ui_img_style; 
-
-typedef ui_txt_source ui_txt_source;
-typedef ui_txt_style  ui_txt_style; 
-
-typedef ui_geo_source ui_geo_source;
-typedef ui_geo_style  ui_geo_style; 
- 
-/*
     Header
 */
 
@@ -49,109 +33,71 @@ typedef struct ui_transform {
     float m10, m11, ty;
 } ui_transform;
 
-// first 3 bits
-#define UI_NODE_TYPE_MASK 0x7
 typedef enum ui_node_type : char {
-    ui_node_spacer, // spacer layout primitive
-    ui_node_box,    // box render primitive
-    ui_node_img,    // image render primitive
-    ui_node_txt,    // text render primitive
-    ui_node_geo,    // custom geometry primitive
-    ui_node_panel   // layout command
+    ui_node_instance,  // instance of given layout
+
+    ui_node_box,       // box    render primitive
+    ui_node_img,       // image  render primitive
+    ui_node_txt,       // text   render primitive
+    ui_node_geo,       // custom render primitive
+
+    ui_node_transform, // render transform
+
+    ui_node_spacer,    // spacer  layout primitive
+    ui_node_padding,   // padding layout primitive
+
+    ui_node_row,       // row    layout
+    ui_node_column,    // column layout
+    ui_node_canvas,    // canvas layout
 } ui_node_type;
 
-// later 5 bits
-#define UI_PANEL_TYPE_MASK 0xF8
-typedef enum ui_panel_type {
-    ui_panel_row     = (1 << 3),
-    ui_panel_column  = (2 << 3),
-    ui_panel_canvas  = (3 << 3),
-    ui_panel_overlay = (4 << 3),
-} ui_panel_type;
+typedef enum ui_node_flag : char {
+    ui_flag_none = 0,
+} ui_node_flag;
 
-typedef unsigned char ui_node_info;
+typedef unsigned int ui_size;
 
 typedef struct ui_node {
-    ui_node_info info;   // panel type | type
-    ui_transform affine; // local transform
-    
-    // type-dependent data
-    union {
-        struct {
-            float width;
-        } spacer;
+    ui_node_type type;
+    ui_node_flag flags;
 
-        struct {
-            const ui_box_style* style;
-        } box;
+    ui_size         child_count;
+    struct ui_node* children;
 
-        struct {
-            const ui_img_source* source;
-            const ui_img_style*  style;
-        } img;
-
-        struct {
-            const ui_txt_source* source;
-            const ui_txt_style*  style;
-        } txt;
-
-        struct {
-            const ui_geo_source* source;
-            const ui_geo_style*  style;
-        } geo;
-
-        struct {
-            size_t                count;
-            const struct ui_node* children;
-        } panel;
-    };
+    void* data;
 } ui_node;
 
+typedef struct ui_spacer_data {
+    float width;
+} ui_spacer_data;
+
+typedef struct ui_padding_data {
+    float left;
+    float right;
+    float top;
+    float bottom;
+} ui_padding_data;
+
+typedef struct ui_row_data {
+    float spacing;
+} ui_row_data;
+
+// Data for column layout
+typedef struct ui_column_data {
+    float spacing;
+} ui_column_data;
+
+typedef struct ui_canvas_data {
+    float width;
+    float height;
+} ui_canvas_data;
+
 // Default ui element transform
-// offset: (0, 0), scale (1, 1), rotation (0)
+// offset: (0, 0), scale: (1, 1), rotation: (0)
 static const ui_transform ui_default_trans = {
     1, 0, 0,
     0, 1, 0
 };
-
-// ===========================
-// Initializers
-
-#define ui_mk_spc(spacer_width) \
-    (ui_node){ .info = ui_node_spacer, .spacer.width = spacer_width }
-
-#define ui_mk_box(box_style) \
-    (ui_node){ .info = ui_node_box, .box.style = box_style, .affine = ui_default_trans }
-
-#define ui_mk_img(img_style, img_source) \
-    (ui_node){ .info = ui_node_img, .img.style = img_style, .img.source = img_source, .affine = ui_default_trans }
-
-#define ui_mk_txt(txt_style, txt_source) \
-    (ui_node){ .info = ui_node_txt, .txt.style = txt_style, .txt.source = txt_source, .affine = ui_default_trans }
-
-#define ui_mk_geo(geo_style, geo_source) \
-    (ui_node){ .info = ui_node_geo, .geo.style = geo_style, .geo.source = geo_source, .affine = ui_default_trans }
-
-#define ui_mk_pan(panel_type, panel_children, panel_count) \
-    (ui_node){ .info = ui_node_panel | panel_type, .panel.children = panel_children, .panel.count = panel_count, .affine = ui_default_trans }
-
-// ===========================
-// Transformed Initializers
-
-#define ui_mk_tr_box(box_style, trs) \
-    (ui_node){ .info = ui_node_box, .box.style = box_style, .affine = trs }
-
-#define ui_mk_tr_img(img_style, img_source, trs) \
-    (ui_node){ .info = ui_node_img, .img.style = img_style, .img.source = img_source, .affine = trs }
-
-#define ui_mk_tr_txt(txt_style, txt_source, trs) \
-    (ui_node){ .info = ui_node_txt, .txt.style = txt_style, .txt.source = txt_source, .affine = trs }
-
-#define ui_mk_tr_geo(geo_style, geo_source, trs) \
-    (ui_node){ .info = ui_node_geo, .geo.style = geo_style, .geo.source = geo_source, .affine = trs }
-
-#define ui_mk_tr_pan(panel_type, panel_children, panel_count, trs) \
-    (ui_node){ .info = ui_node_panel | panel_type, .panel.children = panel_children, .panel.count = panel_count, .affine = trs }
 
 // ===========================
 // Draw
@@ -291,10 +237,10 @@ static inline ui_transform ui_mul(ui_transform p, ui_transform c) {
     Must be definied before inclusion with UI_IMPL
 */
 
-void ui_draw_box(void* ctx, const ui_transform* matrix, const ui_box_style* style);
-void ui_draw_img(void* ctx, const ui_transform* matrix, const ui_img_style* style, const ui_img_source* img); 
-void ui_draw_txt(void* ctx, const ui_transform* matrix, const ui_txt_style* style, const ui_txt_source* txt);
-void ui_draw_geo(void* ctx, const ui_transform* matrix, const ui_geo_style* style, const ui_geo_source* geo);
+void ui_draw_box(void* ctx, const ui_transform* matrix, const void* data);
+void ui_draw_img(void* ctx, const ui_transform* matrix, const void* data); 
+void ui_draw_txt(void* ctx, const ui_transform* matrix, const void* data);
+void ui_draw_geo(void* ctx, const ui_transform* matrix, const void* data);
 
 /*
     Implementation
@@ -302,31 +248,38 @@ void ui_draw_geo(void* ctx, const ui_transform* matrix, const ui_geo_style* styl
 
 // the in transform is the world transform Mx
 // the returned value is local ...
-static ui_transform ui_draw_node(void* ctx, const ui_node* node, ui_transform parent_trs) {
-    ui_transform world = ui_mul(parent_trs, node->affine);
+static ui_transform ui_draw_node(void* ctx, const ui_node* node, ui_transform world) {
+    switch (node->type) {
+        // Transfrom
+        case ui_node_transform: {
+            ui_transform new_world = ui_mul(world, *(ui_transform*)(node->data));
+            for (size_t i = 0; i < node->child_count; i++) {
+                const ui_node* child = &node->children[i];
+                ui_draw_node(ctx, child, new_world);
+            }
+        } break;
 
-    switch (node->info) {
         // Primitives
-        case ui_node_box: ui_draw_box(ctx, &world, node->box.style);                   break;   
-        case ui_node_img: ui_draw_img(ctx, &world, node->img.style, node->img.source); break;
-        case ui_node_txt: ui_draw_txt(ctx, &world, node->txt.style, node->txt.source); break;
-        case ui_node_geo: ui_draw_geo(ctx, &world, node->geo.style, node->geo.source); break;
+        case ui_node_box: ui_draw_box(ctx, &world, node->data);                   break;   
+        case ui_node_img: ui_draw_img(ctx, &world, node->data); break;
+        case ui_node_txt: ui_draw_txt(ctx, &world, node->data); break;
+        case ui_node_geo: ui_draw_geo(ctx, &world, node->data); break;
 
         // Panels
-        case ui_node_panel | ui_panel_row: {
+        case ui_node_row: {
             float x_left  = -1.0f;
             float x_right =  1.0f;
 
-            size_t n = node->panel.count;
+            size_t n = node->child_count;
 
             // Step 1: Compute total spacer width
             float total_spacer_width = 0.0f;
             size_t flexible_count = 0;
 
             for (size_t i = 0; i < n; i++) {
-                const ui_node* child = &node->panel.children[i];
-                if (child->info == ui_node_spacer) {
-                    total_spacer_width += child->spacer.width;
+                const ui_node* child = &node->children[i];
+                if (child->type == ui_node_spacer) {
+                    //total_spacer_width += child->spacer.width;
                 } 
                 else {
                     flexible_count++;
@@ -337,14 +290,14 @@ static ui_transform ui_draw_node(void* ctx, const ui_node* node, ui_transform pa
 
             // Step 2: Layout children
             for (size_t i = 0; i < n; i++) {
-                const ui_node* child = &node->panel.children[i];
+                const ui_node* child = &node->children[i];
 
                 ui_transform local_trs = ui_default_trans;
 
-                if (child->info == ui_node_spacer) {
+                if (child->type == ui_node_spacer) {
                     // Advance x_left by spacer width
-                    x_left += child->spacer.width;
-                    continue; // spacers are invisible
+                    //x_left += child->spacer.width;
+                    //continue; // spacers are invisible
                 }
 
                 // Allocate equal width among flexible children
@@ -363,14 +316,14 @@ static ui_transform ui_draw_node(void* ctx, const ui_node* node, ui_transform pa
             }
         } break;
 
-        case ui_node_panel | ui_panel_column: {
+        case ui_node_column: {
             // Local vertical space in panel coordinates [-1, 1]
             float y_top = 1.0f;
             float y_bottom = -1.0f;
 
-            size_t n = node->panel.count;
+            size_t n = node->child_count;
             for (size_t i = 0; i < n; i++) {
-                const ui_node* child = &node->panel.children[i];
+                const ui_node* child = &node->children[i];
 
                 // Compute how much vertical space this child can get
                 float remaining_height = y_top - y_bottom;
@@ -398,7 +351,7 @@ static ui_transform ui_draw_node(void* ctx, const ui_node* node, ui_transform pa
             }
         } break;
 
-        case ui_node_panel | ui_panel_canvas: {
+        /*case ui_node_canvas: {
             size_t n = node->panel.count;
             for (size_t i = 0; i < n; i++) {
                 const ui_node* child = &node->panel.children[i];
@@ -406,13 +359,13 @@ static ui_transform ui_draw_node(void* ctx, const ui_node* node, ui_transform pa
             }
         } break;
 
-        case ui_node_panel | ui_panel_overlay: {
+        case ui_node_overlay: {
             size_t n = node->panel.count;
             for (size_t i = 0; i < n; i++) {
                 const ui_node* child = &node->panel.children[i];
                 ui_draw_node(ctx, child, world);
             }
-        }
+        }*/
     }
 
     return world;
