@@ -34,17 +34,22 @@ typedef struct ui_transform {
 } ui_transform;
 
 typedef enum ui_node_type : char {
-    ui_node_instance,  // instance of given layout
+    // Special
+
+    ui_node_data_off,  // offsets data reads by own data
+    ui_node_transform, // render transform
+
+    // Primitives
 
     ui_node_box,       // box    render primitive
     ui_node_img,       // image  render primitive
     ui_node_txt,       // text   render primitive
     ui_node_geo,       // custom render primitive
 
-    ui_node_transform, // render transform
-
     ui_node_spacer,    // spacer  layout primitive
     ui_node_padding,   // padding layout primitive
+
+    // Layouts
 
     ui_node_row,       // row    layout
     ui_node_column,    // column layout
@@ -82,7 +87,6 @@ typedef struct ui_row_data {
     float spacing;
 } ui_row_data;
 
-// Data for column layout
 typedef struct ui_column_data {
     float spacing;
 } ui_column_data;
