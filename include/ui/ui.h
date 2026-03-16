@@ -56,10 +56,16 @@ static const ui_transform ui_default_trans = {
 };
 
 typedef enum ui_node_type : char {
-    // Special
+    // Instancing
 
-    ui_node_data_off,         // offsets data reads by own data
+    // unimplemented!
+    ui_node_instance,         // offsets data reads by own data
+
+    // Render
     ui_node_render_transform, // render transform
+
+    // unimplemented!
+    ui_node_render_clip,      // clipping space
 
     // Primitives
 
@@ -69,16 +75,21 @@ typedef enum ui_node_type : char {
     ui_node_geo,       // custom render primitive
 
     ui_node_spacer,    // spacer  layout primitive
+
+    // unimplemented!
     ui_node_padding,   // padding layout primitive
 
     // Layouts
     ui_node_row,       // row    layout
     ui_node_column,    // column layout
-
 } ui_node_type;
 
 typedef enum ui_node_flag : char {
-    ui_flag_none = 0,
+    ui_flag_none       = 0,
+
+    // unimplemented!
+    ui_flag_instanced  = 1, // whether data is instanced (last ui_node_instance data is added to data value)
+    ui_flag_dispatched = 2  // whether data is searched at *node.data or **node.data
 } ui_node_flag;
 
 typedef struct ui_node {
@@ -103,6 +114,12 @@ typedef struct ui_padding_data {
     float top;
     float bottom;
 } ui_padding_data;
+
+// Canvas
+
+typedef struct ui_canvas_data {
+
+} ui_canvas_data;
 
 // Row
 
