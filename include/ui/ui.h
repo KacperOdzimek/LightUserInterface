@@ -23,10 +23,10 @@
 
 #ifdef UI_IMPL
 
-void ui_draw_box(void* ctx, const ui_transform* matrix, const void* data);
-void ui_draw_img(void* ctx, const ui_transform* matrix, const void* data); 
-void ui_draw_txt(void* ctx, const ui_transform* matrix, const void* data);
-void ui_draw_geo(void* ctx, const ui_transform* matrix, const void* data);
+void ui_draw_box(const ui_transform* matrix, const void* data, void* ctx);
+void ui_draw_img(const ui_transform* matrix, const void* data, void* ctx); 
+void ui_draw_txt(const ui_transform* matrix, const void* data, void* ctx);
+void ui_draw_geo(const ui_transform* matrix, const void* data, void* ctx);
 
 #endif
 
@@ -40,13 +40,20 @@ void ui_draw_geo(void* ctx, const ui_transform* matrix, const void* data);
 // ===========================
 // Typedefs
 
-typedef unsigned int ui_size;
+typedef unsigned short ui_proportion;
 
 // structure representing ui elements tranformations (matrix 2x3)
 typedef struct ui_transform {
     float m00, m01, tx;
     float m10, m11, ty;
 } ui_transform;
+
+// Default ui element transform
+// offset: (0, 0), scale: (1, 1), rotation: (0)
+static const ui_transform ui_default_trans = {
+    1, 0, 0,
+    0, 1, 0
+};
 
 typedef enum ui_node_type : char {
     // Special
@@ -77,16 +84,19 @@ typedef enum ui_node_flag : char {
 typedef struct ui_node {
     ui_node_type    type;
     ui_node_flag    flags;
-    ui_size         child_count;
+    size_t          child_count;
     struct ui_node* children;
     void*           data;
 } ui_node;
 
+// Spacer and Padding
+
+// precent - precent of raw current layout space
 typedef struct ui_spacer_data {
-    float precent; // precent of current layout space
+    float precent;
 } ui_spacer_data;
 
-// all cords = precent of curent layout space
+// all cords = precent of raw curent layout space
 typedef struct ui_padding_data {
     float left;
     float right;
@@ -94,27 +104,54 @@ typedef struct ui_padding_data {
     float bottom;
 } ui_padding_data;
 
+// Row
+
+typedef enum ui_row_allign {
+    ui_row_allign_left, 
+    ui_row_allign_center, 
+    ui_row_allign_right
+} ui_row_allign;
+
 typedef struct ui_row_data {
-    float    spacing;
-    ui_size* proportions;
+    // spacing between elements
+    // precent of total layout space
+    float spacing;
+
+    // proportion of received space between elements, 
+    // ignored for spacers (shall be 0 for correct sum)
+    // optional may be 0x0 (equal proportion)
+    ui_proportion* proportions;
+
+    // allignation
+    ui_row_allign  allign;
 } ui_row_data;
 
-typedef struct ui_column_data {
-    float spacing;
-    ui_size* proportions;
-} ui_column_data;
+// Column
 
-// Default ui element transform
-// offset: (0, 0), scale: (1, 1), rotation: (0)
-static const ui_transform ui_default_trans = {
-    1, 0, 0,
-    0, 1, 0
-};
+typedef enum ui_column_allign {
+    ui_column_allign_top, 
+    ui_column_allign_center, 
+    ui_column_allign_bottom
+} ui_column_allign;
+
+typedef struct ui_column_data {
+    // spacing between elements
+    // precent of total layout space
+    float spacing;
+
+    // proportion of received space between elements, 
+    // ignored for spacers (shall be 0 for correct sum)
+    // optional may be 0x0 (equal proportion)
+    ui_proportion*   proportions;
+
+    // allignation
+    ui_column_allign allign;
+} ui_column_data;
 
 // ===========================
 // Draw
 
-void ui_draw(void* ctx, const ui_node* target);
+void ui_draw(const ui_node* node, void* ctx);
 
 // ===========================
 // Runtime Transformation
@@ -248,117 +285,216 @@ static inline ui_transform ui_mul(ui_transform p, ui_transform c) {
 
 #ifdef UI_IMPL
 
-static ui_transform ui_draw_dispatch(void* ctx, const ui_node* node, ui_transform world);
+static inline void calculate_spacer_space(
+    size_t         children_count,
+    const ui_node* children,
+    float*         total_spacer_space, 
+    size_t*        flexible_count
+) {
+    float  spacer_width = 0.0f;
+    size_t flexibles    = 0;
 
-static inline void ui_draw_row(void* ctx, const ui_node* node, ui_transform world) {
-    float x_left  = -1.0f;
-    float x_right =  1.0f;
-
-    size_t n = node->child_count;
-
-    // find total spacer width
-    float  total_spacer_width = 0.0f;
-    size_t flexible_count = 0;
-
-    for (size_t i = 0; i < n; i++) {
-        const ui_node* child = &node->children[i];
-        if (child->type == ui_node_spacer) total_spacer_width += (((ui_spacer_data*)(child->data))->precent * 2.0f);
-        else flexible_count++;
+    for (size_t i = 0; i < children_count; i++) {
+        const ui_node* child = &children[i];
+        if (child->type == ui_node_spacer) spacer_width += (((ui_spacer_data*)(child->data))->precent * 2.0f);
+        else flexibles++;
     }
 
-    float remaining_width = (x_right - x_left) - total_spacer_width;
+    *total_spacer_space = spacer_width;
+    *flexible_count     = flexibles;
+}
 
-    // layout children
-    for (size_t i = 0; i < n; i++) {
+static inline size_t calculate_proportion_sum(
+    size_t               children_count,
+    const ui_proportion* proportions
+) {
+    size_t sum = 0;
+    for (size_t i = 0; i < children_count; i++) sum += proportions[i];
+    return sum;
+}
+
+static const ui_row_data row_data_default = {
+    .allign      = ui_row_allign_left,
+    .proportions = 0x0,
+    .spacing     = 0
+};
+
+static void draw_dispatch(const ui_node* node, ui_transform world, void* ctx);
+
+static inline void draw_row(const ui_node* node, ui_transform world, void* ctx) {
+    const ui_row_data* data = node->data ? node->data : &row_data_default;
+
+    float x_left  = -1.0f;
+    float x_right =  1.0f;
+    float remaining_space = (x_right - x_left);
+
+    // Exclude spacer space
+    float  total_spacer; size_t flexible_count;
+    calculate_spacer_space(node->child_count, node->children, &total_spacer, &flexible_count);
+    remaining_space -= total_spacer;
+
+    // Exclue spacing space
+    float spacing_total = (flexible_count == 0) ? 0.0f : data->spacing * (flexible_count - 1) * 2.0f;
+    remaining_space -= spacing_total;
+
+    // Calculate proportions sum
+    size_t proportion_sum = data->proportions ? 
+        calculate_proportion_sum(node->child_count, data->proportions) : 
+        flexible_count;
+
+    // Alignment offset
+    float content_width = remaining_space + spacing_total;
+    float align_offset = 0.0f;
+
+    switch (data->allign) {
+        case ui_row_allign_center:
+            align_offset = ((x_right - x_left) - total_spacer - content_width) * 0.5f;
+            break;
+
+        case ui_row_allign_right:
+            align_offset = ((x_right - x_left) - total_spacer - content_width);
+            break;
+
+        default: break;
+    }
+
+    x_left += align_offset;
+
+    // Layout children
+    size_t flex_index = 0;
+    for (size_t i = 0; i < node->child_count; i++) {
         const ui_node* child = &node->children[i];
-
-        ui_transform local_trs = ui_default_trans;
 
         if (child->type == ui_node_spacer) {
             x_left += ((ui_spacer_data*)(child->data))->precent * 2.0f;
             continue;
         }
 
-        // allocate equal width among flexible children
-        float child_width = remaining_width / flexible_count;
+        float child_width;
+        if (data->proportions) child_width = remaining_space * ((float)data->proportions[flex_index] / proportion_sum);
+        else                   child_width = remaining_space / flexible_count;
 
-        float x_center = x_left + child_width / 2.0f;
+        float child_center = x_left + child_width * 0.5f;
 
-        local_trs = ui_off(local_trs, x_center, 0);
-        local_trs = ui_sca(local_trs, child_width / 2.0f, 1.0f);
+        ui_transform local = ui_default_trans;
+        local = ui_off(local, child_center, 0.0f);
+        local = ui_sca(local, child_width * 0.5f, 1.0f);
 
-        ui_draw_dispatch(ctx, child, ui_mul(world, local_trs));
+        draw_dispatch(child, ui_mul(world, local), ctx);
 
-        x_left += child_width; // move left edge
-        flexible_count--;
-        remaining_width -= child_width;
-    }
+        x_left += child_width + data->spacing * 2.0f;
+        flex_index++;
+    } 
 }
 
-static inline void ui_draw_col(void* ctx, const ui_node* node, ui_transform world) {
-    // Local vertical space in panel coordinates [-1, 1]
-    float y_top = 1.0f;
-    float y_bottom = -1.0f;
+static const ui_column_data column_data_default = {
+    .allign      = ui_column_allign_top,
+    .proportions = 0x0,
+    .spacing     = 0
+};
 
-    size_t n = node->child_count;
-    for (size_t i = 0; i < n; i++) {
+static inline void draw_column(const ui_node* node, ui_transform world, void* ctx) {
+    const ui_column_data* data = node->data ? node->data : &column_data_default;
+
+    float y_top    =  1.0f;
+    float y_bottom = -1.0f;
+    float remaining_space = (y_top - y_bottom);
+
+    // Exclude spacer space
+    float total_spacer; size_t flexible_count;
+    calculate_spacer_space(node->child_count, node->children, &total_spacer, &flexible_count);
+    remaining_space -= total_spacer;
+
+    // Exclude spacing space
+    float spacing_total = (flexible_count == 0) ? 0.0f : data->spacing * (flexible_count - 1) * 2.0f;
+    remaining_space -= spacing_total;
+
+    // Calculate proportions sum
+    size_t proportion_sum = data->proportions ?
+        calculate_proportion_sum(node->child_count, data->proportions) :
+        flexible_count;
+
+    // Alignment offset
+    float content_height = remaining_space + spacing_total;
+    float align_offset = 0.0f;
+
+    switch (data->allign) {
+        case ui_column_allign_center:
+            align_offset = ((y_top - y_bottom) - total_spacer - content_height) * 0.5f;
+            break;
+
+        case ui_column_allign_bottom:
+            align_offset = ((y_top - y_bottom) - total_spacer - content_height);
+            break;
+
+        default: break;
+    }
+
+    y_top -= align_offset;
+
+    // Layout children
+    size_t flex_index = 0;
+
+    for (size_t i = 0; i < node->child_count; i++) {
         const ui_node* child = &node->children[i];
 
-        // Compute how much vertical space this child can get
-        float remaining_height = y_top - y_bottom;
+        if (child->type == ui_node_spacer) {
+            y_top -= ((ui_spacer_data*)(child->data))->precent * 2.0f;
+            continue;
+        }
 
-        // Allocate proportional share (simple equal division here)
-        float child_height = remaining_height / (n - i);
+        float child_height;
+        if (data->proportions)
+            child_height = remaining_space * ((float)data->proportions[flex_index] / proportion_sum);
+        else
+            child_height = remaining_space / flexible_count;
 
-        // Compute center y for this child in local panel space
-        float y_center = y_top - child_height / 2.0f;
+        float child_center = y_top - child_height * 0.5f;
 
-        // Child transform in panel-local coordinates
-        ui_transform local_trs = ui_default_trans;
+        ui_transform local = ui_default_trans;
+        local = ui_off(local, 0.0f, child_center);
+        local = ui_sca(local, 1.0f, child_height * 0.5f);
 
-        // Translate to child’s vertical position
-        local_trs = ui_off(local_trs, 0, y_center);
+        draw_dispatch(child, ui_mul(world, local), ctx);
 
-        // Scale child vertically to fit allocated height
-        local_trs = ui_sca(local_trs, 1.0f, child_height / 2.0f);
-
-        // Draw child with parent world transform applied
-        ui_transform used_space = ui_draw_dispatch(ctx, child, ui_mul(world, local_trs));
-
-        // Move y_top down for next child in local panel space
-        y_top -= child_height;
+        y_top -= child_height + data->spacing * 2.0f;
+        flex_index++;
     }
 }
 
-// the in transform is the world transform Mx
-// the returned value is local ...
-static ui_transform ui_draw_dispatch(void* ctx, const ui_node* node, ui_transform world) {
+static void draw_dispatch(const ui_node* node, ui_transform world, void* ctx) {
     switch (node->type) {
         // Transfrom
         case ui_node_render_transform: {
             ui_transform new_world = ui_mul(world, *(ui_transform*)(node->data));
             for (size_t i = 0; i < node->child_count; i++) {
                 const ui_node* child = &node->children[i];
-                ui_draw_dispatch(ctx, child, new_world);
+                draw_dispatch(child, new_world, ctx);
             }
         } break;
 
         // Primitives
-        case ui_node_box: ui_draw_box(ctx, &world, node->data); break;   
-        case ui_node_img: ui_draw_img(ctx, &world, node->data); break;
-        case ui_node_txt: ui_draw_txt(ctx, &world, node->data); break;
-        case ui_node_geo: ui_draw_geo(ctx, &world, node->data); break;
+        case ui_node_box: ui_draw_box(&world, node->data, ctx); goto draw_primitive_children;   
+        case ui_node_img: ui_draw_img(&world, node->data, ctx); goto draw_primitive_children;
+        case ui_node_txt: ui_draw_txt(&world, node->data, ctx); goto draw_primitive_children;
+        case ui_node_geo: ui_draw_geo(&world, node->data, ctx); goto draw_primitive_children;
+
+        // draw all children with same transformation
+        draw_primitive_children:
+            for (size_t i = 0; i < node->child_count; i++) {
+                const ui_node* child = &node->children[i];
+                draw_dispatch(child, world, ctx);
+            }
+        break;
 
         // Panels
-        case ui_node_row:    ui_draw_row(ctx, node, world); break;
-        case ui_node_column: ui_draw_col(ctx, node, world); break;
+        case ui_node_row:    draw_row   (node, world, ctx); break;
+        case ui_node_column: draw_column(node, world, ctx); break;
     }
-
-    return world;
 }
 
-void ui_draw(void* ctx, const ui_node* node) {
-    ui_draw_dispatch(ctx, node, ui_default_trans); // begin rendering with full screen
+void ui_draw(const ui_node* node, void* ctx) {
+    draw_dispatch(node, ui_default_trans, ctx); // begin rendering with full screen
 }
 
 #endif
