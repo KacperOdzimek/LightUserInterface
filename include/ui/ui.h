@@ -129,6 +129,12 @@ typedef enum ui_node_type : char {
     //  it's children are drawn in a column, top to bottom
     //  this behavior may be adjusted with ui_column_data
     ui_node_column,
+
+    // input box
+    //  collider for click events
+    //  not named 'button' because it is not rendered
+    //  tho it's children are, with the same transform
+    ui_node_input_box
 } ui_node_type;
 
 typedef enum ui_node_flag : char {
@@ -216,15 +222,52 @@ typedef struct ui_column_data {
     ui_column_flag flags;
 } ui_column_data;
 
+typedef enum ui_input_event_type {
+    ui_input_event_enter,
+    ui_input_event_leave,
+    ui_input_event_hover,
+
+    ui_input_event_mouse_down,
+    ui_input_event_mouse_held,
+    ui_input_event_mouse_up,
+    
+    ui_input_event_scroll
+} ui_input_event_type;
+
+typedef struct ui_input_context {
+    char         mouse_left_down;
+    char         mouse_right_down;
+
+    float        scroll_change;
+
+    unsigned int mouse_position_x;
+    unsigned int mouse_position_y;
+
+    unsigned int resolution_x;
+    unsigned int resolution_y;
+} ui_input_context;
+
+typedef void(*ui_input_callback)(const ui_input_context* ictx, const ui_node* node, ui_input_event_type event_type);
+
+typedef struct ui_input_box_data {
+    ui_input_callback input_callback;
+
+    // own cached, do not use
+    ui_transform transform;
+    char         was_pressed;
+    char         was_inside;
+} ui_input_box_data;
+
 typedef struct ui_draw_context {
     unsigned int resolution_x;
     unsigned int resolution_y;
 } ui_draw_context;
 
 // ===========================
-// Draw
+// Methods
 
-void ui_draw(const ui_draw_context* dctx, const ui_node* node, ui_transform world, void* uctx);
+void ui_draw (const ui_draw_context*  dctx, const ui_node* node, void* uctx);
+void ui_input(const ui_input_context* ictx, const ui_node* node, void* uctx);
 
 // ===========================
 // Runtime Transformation
@@ -357,6 +400,9 @@ static inline ui_transform ui_mul(ui_transform p, ui_transform c) {
 */
 
 #ifdef UI_IMPL
+
+// ===========================
+// Drawing
 
 static inline float length_to_layout(ui_length l, unsigned int axis_pixels) {
     if (l.type == ui_length_fraction) return l.fraction;
@@ -517,6 +563,16 @@ static inline void draw_column(const ui_draw_context* dctx, const ui_node* node,
     }
 }
 
+static void draw_input_box(const ui_draw_context* dctx, const ui_node* node, ui_transform world, void* uctx) {
+    ui_input_box_data* data = node->data;
+    data->transform = world;
+
+    for (size_t i = 0; i < node->child_count; i++) {
+        const ui_node* child = &node->children[i];
+        draw_dispatch(dctx, child, world, uctx);
+    }
+}
+
 static void draw_dispatch(const ui_draw_context* dctx, const ui_node* node, ui_transform world, void* uctx) {
     switch (node->type) {
         // Transfrom
@@ -549,11 +605,113 @@ static void draw_dispatch(const ui_draw_context* dctx, const ui_node* node, ui_t
         // Panels
         case ui_node_row:     draw_row   (dctx, node, world, uctx); break;
         case ui_node_column:  draw_column(dctx, node, world, uctx); break;
+
+        // Input Box
+        case ui_node_input_box: draw_input_box(dctx, node, world, uctx); break;
     }
 }
 
-void ui_draw(const ui_draw_context* dctx, const ui_node* node, ui_transform world, void* uctx) {
+void ui_draw(const ui_draw_context* dctx, const ui_node* node, void* uctx) {
+    ui_transform world = ui_default_trans;
+
+    // [-1, 1] -> [-0.5, 0.5]
+    ui_sca(world, 0.5f, 0.5f);
+
+    // [-0.5, 0.5] -> [0, 1]
+    ui_off(world, 0.5, 0.5);
+
     draw_dispatch(dctx, node, world, uctx);
+}
+
+// ===========================
+// Input
+
+static inline int point_in_box(const ui_input_context* ctx, const ui_transform* t) {
+    // 1. mouse to normalized [0,1]
+    float mx = (float)ctx->mouse_position_x / (float)ctx->resolution_x;
+    float my = (float)ctx->mouse_position_y / (float)ctx->resolution_y;
+
+    // 2. compute inverse of 2x3 affine matrix
+    float det = t->m00 * t->m11 - t->m01 * t->m10;
+    if (det == 0.0f) return 0; // non-invertible
+
+    float inv_det = 1.0f / det;
+
+    // inverse matrix (without translation)
+    float im00 =  t->m11 * inv_det;
+    float im01 = -t->m01 * inv_det;
+    float im10 = -t->m10 * inv_det;
+    float im11 =  t->m00 * inv_det;
+
+    // inverse translation
+    float itx = -(im00 * t->tx + im01 * t->ty);
+    float ity = -(im10 * t->tx + im11 * t->ty);
+
+    // 3. transform mouse into local space
+    float lx = im00 * mx + im01 * my + itx;
+    float ly = im10 * mx + im11 * my + ity;
+
+    // 4. check box bounds (centered at 0, size = 2)
+    return (lx >= -1.0f && lx <= 1.0f &&
+            ly >= -1.0f && ly <= 1.0f);
+}
+
+static void input_dispatch(const ui_input_context* ictx, const ui_node* node, void* uctx);
+
+static inline void input_input_box(const ui_input_context* ictx, const ui_node* node, void* uctx) {
+    ui_input_box_data* data = node->data;
+    if (!data->input_callback) return;
+
+    int inside     = point_in_box(ictx, &data->transform);
+    int mouse_down = ictx->mouse_left_down;
+
+    // --- hover enter ---
+    if (inside && !data->was_inside) {
+        data->input_callback(ictx, node, ui_input_event_enter);
+    }
+    // --- hover leave ---
+    else if (!inside && data->was_inside) {
+        data->input_callback(ictx, node, ui_input_event_leave);
+    }
+    // --- hover (only if not entering this frame) ---
+    else if (inside) {
+        data->input_callback(ictx, node, ui_input_event_hover);
+    }
+
+
+    // --- mouse down (press start) ---
+    if (inside && mouse_down && !data->was_pressed) {
+        data->was_pressed = 1;
+        data->input_callback(ictx, node, ui_input_event_mouse_down);
+    }
+    // --- mouse held (only if not just pressed this frame) ---
+    else if (data->was_pressed && mouse_down) {
+        data->input_callback(ictx, node, ui_input_event_mouse_held);
+    }
+    // --- mouse up ---
+    else if (data->was_pressed && !mouse_down) {
+        data->was_pressed = 0;
+        data->input_callback(ictx, node, ui_input_event_mouse_up);
+    }
+
+
+    // --- scroll (independent) ---
+    if (inside && ictx->scroll_change != 0.0f) {
+        data->input_callback(ictx, node, ui_input_event_scroll);
+    }
+
+
+    // --- update hover state ---
+    data->was_inside = inside;
+}
+
+void input_dispatch(const ui_input_context* ictx, const ui_node* node, void* uctx) {
+    if (node->type == ui_node_input_box) input_input_box(ictx, node, uctx);
+    for (size_t i = 0; i < node->child_count; i++) input_dispatch(ictx, &node->children[i], uctx);
+}
+
+void ui_input(const ui_input_context* ictx, const ui_node* node, void* uctx) {
+    input_dispatch(ictx, node, uctx);
 }
 
 #endif
