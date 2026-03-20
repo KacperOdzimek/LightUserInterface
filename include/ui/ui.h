@@ -98,7 +98,7 @@ typedef enum ui_node_type : char {
 
     // padding layout primitive
     //  unimplemented!
-    ui_node_padding,   
+    ui_node_padding,
 
     // box render primitive
     //  it's children are drawn with same transform
@@ -121,9 +121,13 @@ typedef enum ui_node_type : char {
     ui_node_geo,
 
     // row layout
+    //  it's children are drawn in a row, left to right
+    //  this behavior may be adjusted with ui_row_data
     ui_node_row,
     
     // column layout
+    //  it's children are drawn in a column, top to bottom
+    //  this behavior may be adjusted with ui_column_data
     ui_node_column,
 } ui_node_type;
 
@@ -143,19 +147,13 @@ typedef struct ui_node {
     void*           data;
 } ui_node;
 
-// Spacer and Padding
+// Padding
 
-// percent - percent of raw current layout space
-typedef struct ui_spacer_data {
-    float percent;
-} ui_spacer_data;
-
-// all cords = percent of raw curent layout space
 typedef struct ui_padding_data {
-    float left;
-    float right;
-    float top;
-    float bottom;
+    ui_length left;
+    ui_length right;
+    ui_length top;
+    ui_length bottom;
 } ui_padding_data;
 
 // Row
@@ -367,6 +365,34 @@ static inline float length_to_layout(ui_length l, unsigned int axis_pixels) {
 
 static void draw_dispatch(const ui_draw_context* dctx, const ui_node* node, ui_transform world, void* uctx);
 
+static inline void draw_padding(const ui_draw_context* dctx, const ui_node* node, ui_transform world, void* uctx) {
+    if (!node->child_count) return;
+    const ui_padding_data* data = node->data;
+
+    float left   = length_to_layout(data->left,   dctx->resolution_x);
+    float right  = length_to_layout(data->right,  dctx->resolution_x);
+    float top    = length_to_layout(data->top,    dctx->resolution_y);
+    float bottom = length_to_layout(data->bottom, dctx->resolution_y);
+
+    float x_offset = left - right;  // left moves right, right moves left
+    float y_offset = top - bottom;  // top moves down, bottom moves up
+
+    float available_width  = 1.0f - left - right;
+    float available_height = 1.0f - top - bottom;
+
+    float x_center = left   + available_width  * 0.5f;
+    float y_center = bottom + available_height * 0.5f;
+
+    ui_transform local = ui_default_trans;
+    local = ui_off(local, x_center, y_center);
+    local = ui_sca(local, available_width * 0.5f, available_height * 0.5f);
+
+    ui_transform child_world = ui_mul(world, local);
+    for (size_t i = 0; i < node->child_count; i++) {
+        draw_dispatch(dctx, &node->children[i], child_world, uctx);
+    }
+}
+
 static inline void draw_row(const ui_draw_context* dctx, const ui_node* node, ui_transform world, void* uctx) {
     if (!node->child_count) return; // return to avoid 0 divisions
     const ui_row_data* data = node->data;
@@ -430,6 +456,7 @@ static inline void draw_row(const ui_draw_context* dctx, const ui_node* node, ui
 }
 
 static inline void draw_column(const ui_draw_context* dctx, const ui_node* node, ui_transform world, void* uctx) {
+    if (!node->child_count) return; // return to avoid 0 divisions
     const ui_column_data* data = node->data;
 
     // local coordinate system
@@ -516,9 +543,12 @@ static void draw_dispatch(const ui_draw_context* dctx, const ui_node* node, ui_t
             }
         break;
 
+        // Padding
+        case ui_node_padding: draw_padding(dctx, node, world, uctx); break;
+
         // Panels
-        case ui_node_row:    draw_row   (dctx, node, world, uctx); break;
-        case ui_node_column: draw_column(dctx, node, world, uctx); break;
+        case ui_node_row:     draw_row   (dctx, node, world, uctx); break;
+        case ui_node_column:  draw_column(dctx, node, world, uctx); break;
     }
 }
 
