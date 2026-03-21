@@ -74,7 +74,7 @@ typedef struct ui_node ui_node;
 typedef void(*ui_input_callback)(
     const ui_input_context* ictx, 
     const ui_node*          node, 
-    ui_input_event_type     event_type
+    ui_input_event_type     type
 );
 
 // ===========================
