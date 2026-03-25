@@ -109,7 +109,9 @@ typedef enum ui_sizebox_overwrite_flag {
     ui_sizebox_overwrite_height_des  = 1 << 4,
     ui_sizebox_overwrite_height_min  = 1 << 5,
     ui_sizebox_overwrite_height_max  = 1 << 6,
-    ui_sizebox_overwrite_height_flex = 1 << 7
+    ui_sizebox_overwrite_height_flex = 1 << 7,
+
+    ui_sizebox_overwrite_all          = 255
 } ui_sizebox_overwrite_flag;
 
 typedef struct ui_sizebox_data {
