@@ -1,4 +1,18 @@
 /*
+    Implementation Injections
+*/
+
+#ifdef UI_IMPL
+    typedef struct ui_transform ui_transform;
+
+    static inline void ui_injection_render_box(
+        ui_transform transform, unsigned int pixels_width, unsigned int pixels_height, 
+        const void* box_data,   void* user_context
+    );
+#endif
+
+
+/*
     Header
 */
 
@@ -120,6 +134,9 @@ typedef struct ui_measurement {
 typedef struct ui_tree_info {
     const ui_node*  root;
     ui_measurement* measurements;
+    unsigned int    resolution_x;
+    unsigned int    resolution_y;
+    void*           user_context;
 } ui_tree_info;
 
 size_t ui_subtree(const ui_node* node);
@@ -159,10 +176,6 @@ static inline ui_transform ui_off(ui_transform m, float dx, float dy) {
 static inline ui_transform ui_sca(ui_transform m, float sx, float sy) {
     m.m00 *= sx;  m.m01 *= sy;
     m.m10 *= sx;  m.m11 *= sy;
-
-    m.m00 *= sx; m.m10 *= sx;
-    m.m01 *= sy; m.m11 *= sy;
-
     return m;
 }
 
@@ -257,7 +270,6 @@ static inline ui_transform ui_mul(ui_transform p, ui_transform c) {
     Implementation
 */
 
-#define UI_IMPL
 #ifdef UI_IMPL
 
 // ===========================
@@ -407,17 +419,40 @@ void ui_measure(ui_tree_info* ti) {
 // ===========================
 // Rendering
 
-static size_t render_dispatch(ui_tree_info* ti, const ui_node* node, size_t idx);
+// transform + pixel dimensions
+typedef struct helper_transform_pack {
+    unsigned int pixel_width; 
+    unsigned int pixel_height; 
+    ui_transform trans;
+} helper_transform_pack;
+
+// function dispatching rendering based on node type
+// ti   - tree context
+// node - current context
+// idx  - dfs preorder index
+// trs  - all transformation informations
+static size_t render_dispatch(
+    ui_tree_info* ti, const ui_node* node, size_t idx, helper_transform_pack trs
+);
 
 
-static size_t render_dispatch(ui_tree_info* ti, const ui_node* node, size_t idx) {
+static size_t render_dispatch(ui_tree_info* ti, const ui_node* node, size_t idx, helper_transform_pack trs) {
     switch (node->type) {
-    
+    // for primitves call injected methods
+    case ui_node_box: {
+        ui_injection_render_box(trs.trans, trs.pixel_width, trs.pixel_height, node->data, ti->user_context);
+    } break;
     }
 }
 
 void ui_render(ui_tree_info* ti) {
+    helper_transform_pack trs = {
+        .trans        = ui_default_trans,
+        .pixel_width  = ti->resolution_x,
+        .pixel_height = ti->resolution_y
+    };
 
+    render_dispatch(ti, ti->root, 0, trs);
 }
 
 #endif
