@@ -584,10 +584,9 @@ static void render_default(helper_rendering_walk_context* rc, const ui_node* nod
     int own_width  = helper_find_max_dim_pixels_on_parent_axis(own_measure.width,  trs.pixel_width);
     int own_height = helper_find_max_dim_pixels_on_parent_axis(own_measure.height, trs.pixel_height);
 
-    size_t nidx = idx + 1;
     for (size_t i = 0; i < node->child_count; i++) {
         const ui_node* child = &node->children[i];
-        ui_measurement child_measure = rc->measurements[nidx];
+        ui_measurement child_measure = rc->measurements[cidx + i];
 
         int given_width = helper_find_max_dim_pixels_on_parent_axis(
             child_measure.width, own_width
@@ -597,7 +596,7 @@ static void render_default(helper_rendering_walk_context* rc, const ui_node* nod
             child_measure.height, own_height
         );
 
-        render_dispatch(rc, child, nidx, helper_scale_pack_to_dim(trs, given_width, given_height));
+        render_dispatch(rc, child, cidx + 1, helper_scale_pack_to_dim(trs, given_width, given_height));
     }
 }
 
@@ -638,7 +637,7 @@ void ui_render(ui_tree_info* ti) {
     };
 
     helper_rendering_walk_context rc = {
-        .last_used_index = 1,
+        .last_used_index = 0,
         .measurements    = ti->measurements
     };
 
