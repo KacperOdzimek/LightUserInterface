@@ -129,8 +129,9 @@ typedef struct ui_sizebox_data {
 // row
 
 typedef struct ui_row_data {
-    float     align;    // 0 - align left, 0.5 - align center, 1.0 - align right, other values also work
-    ui_length spacing;  // spacing between childrens
+    float     horizontal_align; // 0 - align left, 0.5 - align center, 1.0 - align right,  other values also work
+    float     vertical_align;   // 0 - align top,  0.5 - align center, 1.0 - align bottom, other values also work
+    ui_length spacing;          // spacing between childrens
 } ui_row_data;
 
 // ===========================
@@ -517,6 +518,11 @@ static inline helper_transform_pack helper_scale_pack_to_dim(helper_transform_pa
     return result;
 }
 
+// Lerp function
+static inline float helper_lerp(float a, float b, float t) {
+    return a + t * (b - a);
+}
+
 // Returns max(length minimum, min(length maximum, parent extend))
 static inline int helper_bound_length_in_parent(ui_length length, int parent_axis_length) {
     int result = length.max;
@@ -651,7 +657,7 @@ static inline void render_row(helper_rendering_walk_context* rc, const ui_node* 
         // find cursor begining
         screen_cursor; {
             float cursor_right_align_pixels = (float)trs.pixel_width - row_measure.width.min;
-            float cursor_interp_pixels = cursor_right_align_pixels * data->align;
+            float cursor_interp_pixels = helper_lerp(0, cursor_right_align_pixels, data->horizontal_align);
             screen_cursor = 2.0f * (cursor_interp_pixels / trs.pixel_width) - 1.0f;
         }
 
@@ -695,7 +701,10 @@ static inline void render_row(helper_rendering_walk_context* rc, const ui_node* 
         const ui_measurement* child_measurement = &rc->measurements[cidx + i];
 
         // find child dimension in pixels
-        int child_width  = doflex ? child_measurement->width.max : child_measurement->width.min;
+        int child_width;
+        if (doflex) child_width = child_measurement->width.max == ui_inf_length ? trs.pixel_width : child_measurement->width.max;
+        else        child_width = child_measurement->width.min;
+
         int child_height = helper_bound_length_in_parent(child_measurement->height, trs.pixel_height);
 
         // take flex
@@ -713,9 +722,21 @@ static inline void render_row(helper_rendering_walk_context* rc, const ui_node* 
         float screen_child_width  = 2 * (float)child_width  / trs.pixel_width;
         float screen_child_height = 2 * (float)child_height / trs.pixel_height;
 
+        // find vertical aligment offset
+        float screen_vertical_offset_top    =  1.0f - screen_child_height / 2.0f;
+        float screen_vertical_offset_bottom = -1.0f + screen_child_height / 2.0f;
+        float screen_vertical_offset = helper_lerp(
+            screen_vertical_offset_top,
+            screen_vertical_offset_bottom,
+            data->vertical_align
+        );
+
         // find child transformation
         helper_transform_pack child_trs = trs;
-        child_trs.trans = ui_off(child_trs.trans, screen_cursor + screen_child_width / 2.0f, 0.0f);
+        child_trs.trans = ui_off(child_trs.trans, 
+            screen_cursor + screen_child_width / 2.0f, 
+            screen_vertical_offset
+        );
         child_trs = helper_scale_pack_to_dim(child_trs, child_width, child_height);
 
         // render child
