@@ -11,7 +11,6 @@
     );
 #endif
 
-
 /*
     Header
 */
@@ -157,7 +156,7 @@ void   ui_render (ui_tree_info* ti);
 // ===========================
 // Transformations Implemenations
 
-static inline ui_transform ui_trans(float offx, float offy, float scalex, float scaley, float deg_cw) {
+static inline ui_transform ui_trans(float dx, float dy, float sx, float sy, float deg_cw) {
     float rad = deg_cw * (3.14159265358979323846f / 180.0f);
 
     #ifdef UI_IMPL_INVERT_ROTATION
@@ -169,12 +168,12 @@ static inline ui_transform ui_trans(float offx, float offy, float scalex, float 
     #endif
 
     return (ui_transform){
-        .m00 = cosr * scalex,
-        .m01 = sinr * scaley,
-        .tx  = offx,
-        .m10 = -sinr * scalex,
-        .m11 = cosr * scaley,
-        .ty  = offy
+        .m00 = cosr * sx,
+        .m01 = sinr * sy,
+        .tx  = dx,
+        .m10 = -sinr * sx,
+        .m11 = cosr * sy,
+        .ty  = dy
     };
 }
 
@@ -609,7 +608,7 @@ static inline void render_padding(helper_rendering_walk_context* rc, const ui_no
         free_width = helper_max(free_width, data->left.min + data->right.min);      // lower bound
 
         int free_height = trs.pixel_height - child_height;
-        free_height = helper_min(free_height, data->left.max + data->right.max);    // upper bound
+        free_height = helper_min(free_height, data->top.max + data->bottom.max);    // upper bound
         free_height = helper_max(free_height, data->top.min + data->bottom.min);    // lower bound
 
         // for even scaling compare target padding sizes and scale along
@@ -639,7 +638,8 @@ static inline void render_padding(helper_rendering_walk_context* rc, const ui_no
     }
 }
 
-// layout and render children in a row
+// Layouts and renders children in a sequence
+// Divides leftower space among children proportional to their flex values
 static inline void render_row(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs) {
     const ui_row_data* data = node->data;
     ui_measurement     row_measure = rc->measurements[idx];
@@ -655,28 +655,16 @@ static inline void render_row(helper_rendering_walk_context* rc, const ui_node* 
     // content exceed parent, draw with minimal sizes
     if (row_measure.width.min > trs.pixel_width || flexsum == 0.0f) {
         // find cursor begining
-        screen_cursor; {
-            float cursor_right_align_pixels = (float)trs.pixel_width - row_measure.width.min;
-            float cursor_interp_pixels = helper_lerp(0, cursor_right_align_pixels, data->horizontal_align);
-            screen_cursor = 2.0f * (cursor_interp_pixels / trs.pixel_width) - 1.0f;
-        }
-
-        // find spacing
+        float cursor_interp_pixels = helper_lerp(0, (float)trs.pixel_width - row_measure.width.min, data->horizontal_align);
+        screen_cursor  = 2.0f * (cursor_interp_pixels / trs.pixel_width) - 1.0f;
         screen_spacing = 2 * (float)data->spacing.min / trs.pixel_width;
-
-        // set left width to entire parent
-        left_width = trs.pixel_width;
-
-        // disable flexing
-        doflex = 0;
+        left_width     = trs.pixel_width;
+        doflex         = 0;
     }
     // content does not exceed parent, extra space left
     else {
-        // find cursor begining always at left since spanning entire parent
-        screen_cursor = -1.0f;
-
-        // set left width to entire parent
-        left_width = trs.pixel_width;
+        screen_cursor = -1.0f;          // find cursor begining always at left since spanning entire parent
+        left_width = trs.pixel_width;   // set left width to entire parent
 
         // find spacing
         screen_spacing; {
@@ -701,20 +689,20 @@ static inline void render_row(helper_rendering_walk_context* rc, const ui_node* 
         const ui_measurement* child_measurement = &rc->measurements[cidx + i];
 
         // find child dimension in pixels
-        int child_width;
-        if (doflex) child_width = child_measurement->width.max == ui_inf_length ? trs.pixel_width : child_measurement->width.max;
-        else        child_width = child_measurement->width.min;
+        int child_width = doflex
+            ? (child_measurement->width.max == ui_inf_length ? trs.pixel_width : child_measurement->width.max)
+            : child_measurement->width.min;
 
         int child_height = helper_bound_length_in_parent(child_measurement->height, trs.pixel_height);
 
         // take flex
         if (doflex) {
-            int space = left_width * (child_measurement->width.flex / flexsum);
-            space = helper_min(space, child_measurement->width.max); // upper bound
-            space = helper_max(space, child_width);                  // lower bound
-            child_width = space;
+            int taken = left_width * (child_measurement->width.flex / flexsum);
+            taken = helper_min(taken, child_measurement->width.max); // upper bound
+            taken = helper_max(taken, child_width);                  // lower bound
+            child_width = taken;
 
-            left_width -= space;
+            left_width -= taken;
             flexsum    -= child_measurement->width.flex;
         }
 
@@ -723,11 +711,9 @@ static inline void render_row(helper_rendering_walk_context* rc, const ui_node* 
         float screen_child_height = 2 * (float)child_height / trs.pixel_height;
 
         // find vertical aligment offset
-        float screen_vertical_offset_top    =  1.0f - screen_child_height / 2.0f;
-        float screen_vertical_offset_bottom = -1.0f + screen_child_height / 2.0f;
         float screen_vertical_offset = helper_lerp(
-            screen_vertical_offset_top,
-            screen_vertical_offset_bottom,
+            1.0f - screen_child_height / 2.0f,  // top align
+            -1.0f + screen_child_height / 2.0f, // down align
             data->vertical_align
         );
 
