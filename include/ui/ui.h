@@ -379,7 +379,10 @@ static inline void measure_padding(helper_measurement_walk_context* mc, const ui
     if (own->width.max != ui_inf_length) own->width.max  += data->left.max + data->right.max;
 
     own->height.min += data->top.min + data->bottom.min;
-   if (own->height.max != ui_inf_length)  own->height.max += data->top.max + data->bottom.max;
+    if (own->height.max != ui_inf_length)  own->height.max += data->top.max + data->bottom.max;
+
+    if (data->left.flex != 0.0f || data->right.flex != 0.0f)  own->width.flex  = 1.0f;
+    if (data->top.flex != 0.0f  || data->bottom.flex != 0.0f) own->height.flex = 1.0f;
 }
 
 // Measure option for ui_node_sizebox in two steps:
@@ -595,7 +598,7 @@ static inline void render_padding(helper_rendering_walk_context* rc, const ui_no
         int child_width  = child_measurement->width.min;
         int child_height = child_measurement->height.min;
 
-        int free_width  = trs.pixel_width  - child_width;
+        int free_width  = trs.pixel_width - child_width;
         free_width = helper_min(free_width, data->left.max + data->right.max);      // upper bound
         free_width = helper_max(free_width, data->left.min + data->right.min);      // lower bound
 
@@ -637,6 +640,7 @@ static inline void render_row(helper_rendering_walk_context* rc, const ui_node* 
 
     // find flexsum
     float flexsum = helper_children_flexsum_width(rc->measurements, node->child_count, node->children, cidx);
+    flexsum += data->spacing.flex;
 
     // rendering variables
     float screen_cursor, screen_spacing;
@@ -691,12 +695,12 @@ static inline void render_row(helper_rendering_walk_context* rc, const ui_node* 
         const ui_measurement* child_measurement = &rc->measurements[cidx + i];
 
         // find child dimension in pixels
-        int child_width  = child_measurement->width.min;
+        int child_width  = doflex ? child_measurement->width.max : child_measurement->width.min;
         int child_height = helper_bound_length_in_parent(child_measurement->height, trs.pixel_height);
 
         // take flex
         if (doflex) {
-            int space = left_width * child_measurement->width.flex / flexsum;
+            int space = left_width * (child_measurement->width.flex / flexsum);
             space = helper_min(space, child_measurement->width.max); // upper bound
             space = helper_max(space, child_width);                  // lower bound
             child_width = space;
