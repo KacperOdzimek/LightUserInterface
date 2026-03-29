@@ -1,32 +1,14 @@
-#include <stddef.h>
-#include <math.h>
-
 /*
-    User Info
-*/
-
-/*
-    Before including the header you have to define thing's injected into the library below.
-
-    Note header defines shall be the same for all affinelation units 
-    - it is recommended to wrap ui.h inclusion with your own header with the defintions.
-
-    Also note, you can implement ui_draw functions in the same affinelation unit as the
-    ui.h implementation by first including ui.h without UI_IMPL (for ui_transform definition),
-    and later with UI_IMPL (for implementation)
-
-    Coordinate system:
-    (0, 0) - bottom left
-    (1, 1) - upper right
+    Implementation Injections
 */
 
 #ifdef UI_IMPL
+    typedef struct ui_transform ui_transform;
 
-void ui_draw_box(const ui_transform* matrix, const void* data, void* user_context);
-void ui_draw_img(const ui_transform* matrix, const void* data, void* user_context); 
-void ui_draw_txt(const ui_transform* matrix, const void* data, void* user_context);
-void ui_draw_geo(const ui_transform* matrix, const void* data, void* user_context);
-
+    static inline void ui_injection_render_box(
+        ui_transform transform, int pixels_width, int pixels_height, 
+        const void* box_data, void* user_context
+    );
 #endif
 
 /*
@@ -36,72 +18,23 @@ void ui_draw_geo(const ui_transform* matrix, const void* data, void* user_contex
 #ifndef UI_H
 #define UI_H
 
-// ===========================
-// Api Typedefs
-
-typedef struct ui_draw_context {
-    unsigned int resolution_x;
-    unsigned int resolution_y;
-} ui_draw_context;
-
-typedef enum ui_input_event_type {
-    ui_input_event_enter,
-    ui_input_event_leave,
-    ui_input_event_hover,
-
-    ui_input_event_mouse_down,
-    ui_input_event_mouse_held,
-    ui_input_event_mouse_up,
-    
-    ui_input_event_scroll
-} ui_input_event_type;
-
-typedef struct ui_input_context {
-    char         mouse_left_down;
-    char         mouse_right_down;
-
-    float        scroll_change;
-
-    unsigned int mouse_position_x;
-    unsigned int mouse_position_y;
-
-    unsigned int resolution_x;
-    unsigned int resolution_y;
-} ui_input_context;
-
-typedef struct ui_node ui_node;
-
-typedef void(*ui_input_callback)(
-    const ui_input_context* ictx, 
-    const ui_node*          node, 
-    ui_input_event_type     type
-);
+#include <stddef.h>
+#include <math.h>
 
 // ===========================
-// Node Typedefs
+// Layout Length
 
-typedef enum ui_length_type {
-    ui_length_pixels = 0,
-    ui_length_fraction
-} ui_length_type;
+const static int ui_inf_length = 0x7FFFFFFF;
 
 // structure representing 1d length
 typedef struct ui_length {
-    ui_length_type type;
-    union {
-        unsigned int pixels;
-        float        fraction;
-    };
-    
+    int   min;  // minimum dimension
+    int   max;  // maximum dimension
+    float flex; // flex ratio
 } ui_length;
 
-// shorthand macro for ui_length literal with value as screen pixels
-#define UI_PIX(pixels_count_unsigned_int) \
-    ((ui_length){.type = ui_length_pixels,  .pixels = pixels_count_unsigned_int})
-
-// shorthand macro for ui_length literal with value as fraction of layout space
-#define UI_FRC(fraction_float_positive) \
-    ((ui_length){.type = ui_length_fraction, .fraction = fraction_float_positive})
+// ===========================
+// Render Transforms
 
 // structure representing ui elements tranformations (matrix 2x3)
 typedef struct ui_transform {
@@ -116,172 +49,114 @@ static const ui_transform ui_default_trans = {
     0, 1, 0
 };
 
-typedef enum ui_node_type : char {
-    // instance
-    //  offsets data reads by own data
-    //  unimplemented!
-    ui_node_instance,
+// runtime transformations
 
-    // render tranform
-    //  all of it's children are drawn transformed by
-    //  ui_transform matrix at *data
-    ui_node_render_transform,
+// build transform:
+// identity -> rotate(deg_cw) -> scale(sx, sy) -> offset(dx, dy)
+// UI_TRANS <- compile time alternative
+static inline ui_transform ui_trans(float dx, float dy, float sx, float sy, float deg_cw);
 
-    // render clip
-    //  unimplemented!
-    ui_node_render_clip,
+// translate/offset transform by dx, dy normalized units
+static inline ui_transform ui_off(ui_transform m, float dx, float dy);
 
-    // blank layout primitive
-    //  does not render anything
-    //  it's children are drawn with same transform
-    //  may be used as a spacer primitive
+// scale transform by sx in x and sy in y
+static inline ui_transform ui_sca(ui_transform m, float sx, float sy);
+
+// rotate transform by degrees clockwise
+static inline ui_transform ui_rot(ui_transform m, float deg_cw);
+
+// UI_TRANS <- compile time ui_trans transform builder macro (define later in the file)
+
+// ===========================
+// Node Typedef
+
+// common
+
+typedef enum ui_node_type {
     ui_node_blank,
 
-    // padding layout primitive
-    //  it's children are drawn padded by lengths from *data
-    ui_node_padding,
+    ui_node_padding, // padds children by given amount of pixels
+    ui_node_sizebox, // pushes size constraint
 
-    // box render primitive
-    //  it's children are drawn with same transform
-    //  rendered with user provided ui_draw_box
-    ui_node_box,
-
-    // image render primitive
-    //  it's children are drawn with same transform
-    //  rendered with user provided ui_draw_img
-    ui_node_img,
-
-    // text render primitive
-    //  it's children are drawn with same transform
-    //  rendered with user provided ui_draw_txt
-    ui_node_txt,
-
-    // custom geometry render primitive
-    //  it's children are drawn with same transform
-    //  rendered with user provided ui_draw_geo
-    ui_node_geo,
-
-    // row layout
-    //  it's children are drawn in a row, left to right
-    //  this behavior may be adjusted with ui_row_data
-    ui_node_row,
-    
-    // column layout
-    //  it's children are drawn in a column, top to bottom
-    //  this behavior may be adjusted with ui_column_data
-    ui_node_column,
-
-    // input box
-    //  collider for click events
-    //  not named 'button' because it is not rendered
-    //  tho it's children are, with the same transform
-    ui_node_input_box
+    ui_node_row,     // row component 
+    ui_node_box,     // box draw render primitive
 } ui_node_type;
 
-typedef enum ui_node_flag : char {
-    ui_flag_none       = 0,
-
-    // unimplemented!
-    ui_flag_instanced  = 1, // whether data is instanced (last ui_node_instance data is added to data value)
-    ui_flag_dispatched = 2  // whether data is searched at *node.data or **node.data
+typedef enum ui_node_flag {
+    ui_flag_none = 0
 } ui_node_flag;
 
 typedef struct ui_node {
     ui_node_type    type;
-    ui_node_flag    flags;
+    ui_node_flag    flag;
+
     size_t          child_count;
     struct ui_node* children;
-    void*           data;
+
+    const void*     data;
 } ui_node;
 
-// Padding
+// padding
 
 typedef struct ui_padding_data {
-    ui_length left;
-    ui_length right;
-    ui_length top;
-    ui_length bottom;
+    ui_length left, right, top, bottom;
 } ui_padding_data;
 
-// Row
+// sizebox
 
-typedef enum ui_row_flag {
-    ui_row_flag_align_left    = 0,
-    ui_row_flag_align_center  = 1,
-    ui_row_flag_align_right   = 2,
-    ui_row_flag_align_justify = 3,
+typedef enum ui_sizebox_overwrite_flag {
+    ui_sizebox_overwrite_none        = 0,
+    ui_sizebox_overwrite_all         = 255,
+    ui_sizebox_overwrite_all_width   = 15,
+    ui_sizebox_overwrite_all_height  = 240,
 
-    ui_row_flag_not_uniform_width = 4,
-} ui_row_flag;
+    ui_sizebox_overwrite_width_min   = 1 << 1,
+    ui_sizebox_overwrite_width_max   = 1 << 2,
+    ui_sizebox_overwrite_width_flex  = 1 << 3,
+
+    ui_sizebox_overwrite_height_min  = 1 << 5,
+    ui_sizebox_overwrite_height_max  = 1 << 6,
+    ui_sizebox_overwrite_height_flex = 1 << 7
+} ui_sizebox_overwrite_flag;
+
+typedef struct ui_sizebox_data {
+    ui_sizebox_overwrite_flag flag;
+    ui_length                 width;
+    ui_length                 height;    
+} ui_sizebox_data;
+
+// row
 
 typedef struct ui_row_data {
-    // spacing between elements
-    // ignored, if ui_row_flag_align_justify is active
-    // if the spacing is automatic to fill entire row
-    ui_length spacing;
-
-    union {
-        // uniform width for all children 
-        // (used if not flag ui_row_flag_not_uniform_width)
-        ui_length  width;
-
-        // children widths array 
-        // (used if flag ui_row_flag_not_uniform_width)
-        ui_length* widths;
-    };
-
-    // flags
-    ui_row_flag flags;
+    float     horizontal_align; // 0 - align left, 0.5 - align center, 1.0 - align right,  other values also work
+    float     vertical_align;   // 0 - align top,  0.5 - align center, 1.0 - align bottom, other values also work
+    ui_length spacing;          // spacing between childrens
 } ui_row_data;
 
-// Column
+// ===========================
+// Api
 
-typedef enum ui_column_flag {
-    ui_column_flag_align_top     = 0, 
-    ui_column_flag_align_center  = 1, 
-    ui_column_flag_align_bottom  = 2,
-    ui_column_flag_align_justify = 3,
+typedef struct ui_measurement {
+    ui_length width;
+    ui_length height;
+} ui_measurement;
 
-    ui_column_flag_not_uniform_height = 4,
-} ui_column_flag;
+typedef struct ui_tree_info {
+    const ui_node*  root;
+    ui_measurement* measurements;
+    int             resolution_x;
+    int             resolution_y;
+    void*           user_context;
+} ui_tree_info;
 
-typedef struct ui_column_data {
-    // spacing between elements
-    ui_length spacing;
-
-    union {
-        // uniform height for all children 
-        // (used if not ui_column_flag_not_uniform_height)
-        ui_length  height;
-
-        // children heights array 
-        // (used if ui_column_flag_not_uniform_height)
-        ui_length* heights;
-    };
-    
-    // flags
-    ui_column_flag flags;
-} ui_column_data;
-
-typedef struct ui_input_box_data {
-    ui_input_callback input_callback;
-
-    // private data, do not use
-    ui_transform private_transform;
-    char         private_was_pressed;
-    char         private_was_inside;
-} ui_input_box_data;
+size_t ui_subtree(const ui_node* node);
+void   ui_measure(ui_tree_info* ti);
+void   ui_render (ui_tree_info* ti);
 
 // ===========================
-// Methods
+// Transformations Implemenations
 
-void ui_draw (const ui_draw_context*  dctx, const ui_node* node, void* uctx);
-void ui_input(const ui_input_context* ictx, const ui_node* node, void* uctx);
-
-// ===========================
-// Runtime Transformation
-
-static inline ui_transform ui_trans(float offx, float offy, float scalex, float scaley, float deg_cw) {
+static inline ui_transform ui_trans(float dx, float dy, float sx, float sy, float deg_cw) {
     float rad = deg_cw * (3.14159265358979323846f / 180.0f);
 
     #ifdef UI_IMPL_INVERT_ROTATION
@@ -293,12 +168,12 @@ static inline ui_transform ui_trans(float offx, float offy, float scalex, float 
     #endif
 
     return (ui_transform){
-        .m00 = cosr * scalex,
-        .m01 = sinr * scaley,
-        .tx  = offx,
-        .m10 = -sinr * scalex,
-        .m11 = cosr * scaley,
-        .ty  = offy
+        .m00 = cosr * sx,
+        .m01 = sinr * sy,
+        .tx  = dx,
+        .m10 = -sinr * sx,
+        .m11 = cosr * sy,
+        .ty  = dy
     };
 }
 
@@ -349,9 +224,6 @@ static inline ui_transform ui_mul(ui_transform p, ui_transform c) {
     return r;
 }
 
-// ===========================
-// Compile Time Transformation
-
 // compile time fmod function
 #define UI_FMOD_APPROX(x, m) \
     ( ((x) >= 0.0f) ? ((x) - (m) * (int)((x)/(m))) : ((x) - (m) * ((int)((x)/(m)) - 1)) )
@@ -392,6 +264,7 @@ static inline ui_transform ui_mul(ui_transform p, ui_transform c) {
 
 // compile time tranformation matrix builder
 // transformation order: rotate, scale, translate
+// this macro may be a little slow to process, be aware
 #define UI_TRANS(offx, offy, scax, scay, deg_cw) \
     (ui_transform){ \
         .m00 = UI_COS_APPROX(UI_DEG_TO_RAD(deg_cw)) * (scax), \
@@ -410,314 +283,488 @@ static inline ui_transform ui_mul(ui_transform p, ui_transform c) {
 
 #ifdef UI_IMPL
 
+/*
+    Important implementation note!
+    In both measure and render passes the tree is walked IN THE SAME ORDER
+    This is to assure consistient indexation of children nodes
+
+    Rules:
+    - Root is index 0
+    - We always walk children left to right
+    - The next processed node always takes the first free index
+    - We enter a child, after all children of current node are indexed
+
+    Example:
+       0
+    /     \
+    1     2
+    | \   | \
+    3  4  5 6
+
+    The last used index is saved inside walk context
+*/
+
 // ===========================
-// Drawing
+// Subtree
 
-static inline float length_to_layout(ui_length l, unsigned int axis_pixels) {
-    if (l.type == ui_length_fraction) return l.fraction;
-    return ((float)(l.pixels) / axis_pixels);
+size_t ui_subtree(const ui_node* node) {
+    size_t res = 1; for (size_t i = 0; i < node->child_count; i++) res += ui_subtree(&node->children[i]);
+    return res;
 }
 
-static void draw_dispatch(const ui_draw_context* dctx, const ui_node* node, ui_transform world, void* uctx);
+// ===========================
+// Measuring
 
-static inline void draw_padding(const ui_draw_context* dctx, const ui_node* node, ui_transform world, void* uctx) {
-    if (!node->child_count) return;
-    const ui_padding_data* data = node->data;
+// max(a, b)
+static inline int helper_max(int a, int b) {
+    return a > b ? a : b;
+}
 
-    float left   = length_to_layout(data->left,   dctx->resolution_x);
-    float right  = length_to_layout(data->right,  dctx->resolution_x);
-    float top    = length_to_layout(data->top,    dctx->resolution_y);
-    float bottom = length_to_layout(data->bottom, dctx->resolution_y);
+// min(a, b)
+static inline int helper_min(int a, int b) {
+    return a < b ? a : b;
+}
 
-    float x_offset = left - right;  // left moves right, right moves left
-    float y_offset = top - bottom;  // top moves down, bottom moves up
+typedef struct helper_measurement_walk_context {
+    size_t          last_used_index;    // see implementation note
+    ui_measurement* measurements;       // write target
+} helper_measurement_walk_context;
 
-    float available_width  = 1.0f - left - right;
-    float available_height = 1.0f - top - bottom;
+// Function dispatching measuring based on node type
+// - mc   - measurement walk context
+// - node - current context
+// - idx  - tree order index
+// This function also index node children
+// All measure dispatch case functions have extra argument
+// - cidx - first child index
+static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node* node, size_t idx);
 
-    float x_center = left   + available_width  * 0.5f;
-    float y_center = bottom + available_height * 0.5f;
+// Default measure option
+// If no children, defaults to (ui_length){0, inf, 1.0f} on both axes
+// Else for both axes:
+// - minimum = max minimum dim among children
+// - maximum = min maximum dim among children
+// - flex        = 1.0f (function meant for primitives like boxes that shall always span)
+static inline void measure_span_on_children(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
+    ui_measurement own = {
+        .width  = {0, ui_inf_length, 1.0f},
+        .height = {0, ui_inf_length, 1.0f}
+    };
 
-    ui_transform local = ui_default_trans;
-    local = ui_off(local, x_center, y_center);
-    local = ui_sca(local, available_width * 0.5f, available_height * 0.5f);
-
-    ui_transform child_world = ui_mul(world, local);
     for (size_t i = 0; i < node->child_count; i++) {
-        draw_dispatch(dctx, &node->children[i], child_world, uctx);
+        const ui_node*        child  = &node->children[i];
+        const ui_measurement* result = &mc->measurements[cidx + i];
+        measure_dispatch(mc, child, cidx + i);
+
+        own.width.min  = helper_max(own.width.min, result->width.min);
+        own.width.max  = helper_min(own.width.max, result->width.max);
+
+        own.height.min = helper_max(own.height.min, result->height.min);
+        own.height.max = helper_min(own.height.max, result->height.max);
     }
+
+    mc->measurements[idx] = own;
 }
 
-static inline void draw_row(const ui_draw_context* dctx, const ui_node* node, ui_transform world, void* uctx) {
-    if (!node->child_count) return; // return to avoid 0 divisions
+// Measure option for ui_node_padding in two steps:
+// - Measure children with 'measure_span_on_children'
+// - Extend each axis by padding
+static inline void measure_padding(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
+    measure_span_on_children(mc, node, idx, cidx);
+
+    const ui_padding_data* data = node->data;
+    ui_measurement*        own  = &mc->measurements[idx];
+
+    own->width.min  += data->left.min + data->right.min;
+    if (own->width.max != ui_inf_length) own->width.max  += data->left.max + data->right.max;
+
+    own->height.min += data->top.min + data->bottom.min;
+    if (own->height.max != ui_inf_length)  own->height.max += data->top.max + data->bottom.max;
+
+    if (data->left.flex != 0.0f || data->right.flex != 0.0f)  own->width.flex  = 1.0f;
+    if (data->top.flex != 0.0f  || data->bottom.flex != 0.0f) own->height.flex = 1.0f;
+}
+
+// Measure option for ui_node_sizebox in two steps:
+// - Measure children with 'measure_span_on_children'
+// - Overwrite specified by data->flag fields with values from data
+static inline void measure_sizebox(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
+    measure_span_on_children(mc, node, idx, cidx);
+
+    const ui_sizebox_data* data = node->data;
+    ui_measurement*        own  = &mc->measurements[idx];
+
+    if (data->flag & ui_sizebox_overwrite_width_min)   own->width.min   = data->width.min;
+    if (data->flag & ui_sizebox_overwrite_width_max)   own->width.max   = data->width.max;
+    if (data->flag & ui_sizebox_overwrite_width_flex)  own->width.flex  = data->width.flex;
+
+    if (data->flag & ui_sizebox_overwrite_height_min)  own->height.min  = data->height.min;
+    if (data->flag & ui_sizebox_overwrite_height_max)  own->height.max  = data->height.max;
+    if (data->flag & ui_sizebox_overwrite_height_flex) own->height.flex = data->height.flex;
+}
+
+// Measure option for ui_node_row
+//
+// Width:
+// - minimum = sum over children + spacing minimum
+// - maximum = clamp(sum over children + spacing maximum, inf)
+// - flex    = 1.0f if at least one child or row.spacing have non zero flex else 0
+//
+// Height:
+// - minimum = max over children
+// - maximum = max over children
+// - flex    = 1.0f if at least one child non zero flex else 0
+static inline void measure_row(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
     const ui_row_data* data = node->data;
 
-    // local coordinate system
-    const float total_width = 1.0f;
-    const float x_left      = 0.0f;
-    const float x_right     = 1.0f;
+    ui_measurement own = {
+        .width  = {0, 0, 0.0f},
+        .height = {0, 0, 0.0f}
+    };
 
-    // calculate children size
-    float total_children = 0.0f;
-    if (!(data->flags & ui_row_flag_not_uniform_width)) {
-        total_children = length_to_layout(data->width, dctx->resolution_x) * node->child_count;
-    }
-    else for (size_t i = 0; i < node->child_count; i++) {
-        total_children += length_to_layout(data->widths[i], dctx->resolution_x);
-    }
-
-    // calculate spacing size
-    float spacing, total_spacing;
-    if ((data->flags & 0x3) != ui_row_flag_align_justify) {
-        spacing       = length_to_layout(data->spacing, dctx->resolution_x);
-        total_spacing = spacing * (node->child_count - 1);
-    }
-    else {
-        total_spacing = total_width - total_children;
-        if (total_spacing < 0) total_spacing = 0.0f;
-        spacing = total_spacing / (node->child_count - 1);
-    }
-
-    // calculate total size
-    float total_size = total_spacing + total_children;
-
-    // find starting point, based on alligment
-    float x_cursor;
-    switch (data->flags & 0x3) {
-        case ui_row_flag_align_left:    x_cursor = x_left;                                    break;
-        case ui_row_flag_align_center:  x_cursor = x_left + (total_width - total_size) *0.5f; break;
-        case ui_row_flag_align_right:   x_cursor = x_left + (total_width - total_size);       break;
-        case ui_row_flag_align_justify: x_cursor = x_left;                                    break;
-    }
-
-    // layout children
     for (size_t i = 0; i < node->child_count; i++) {
-        ui_length len = data->flags & ui_row_flag_not_uniform_width ? data->widths[i] : data->width;
+        const ui_node*        child  = &node->children[i];
+        const ui_measurement* result = &mc->measurements[cidx + i];
+        measure_dispatch(mc, child, cidx + i);
 
-        // convert length to layout units
-        float width    = length_to_layout(len, dctx->resolution_x);
-        float x_center = x_cursor + width * 0.5f;
+        own.width.min += result->width.min;
 
-        // local transform
-        ui_transform local = ui_default_trans;
-        local = ui_off(local, x_center, 0.0f);
-        local = ui_sca(local, width / 2, 1.0f);
+        // overflow check, children are likely to return inf in max field
+        // if so, clamp to inf
+        if (own.width.max == ui_inf_length || result->width.max == ui_inf_length) own.width.max = ui_inf_length;
+        else own.width.max += result->width.max;
 
-        draw_dispatch(dctx, &node->children[i], ui_mul(world, local), uctx);
+        // enable flex if child do flex
+        if (result->width.flex != 0.0f) own.width.flex = 1.0f;
 
-        // move cursor down
-        x_cursor += width + spacing;
+        own.height.min = helper_max(own.height.min, result->height.min);
+        own.height.max = helper_max(own.height.max, result->height.max);
+
+        // enable flex if child do flex
+        if (result->height.flex != 0.0f) own.height.flex = 1.0f;
     }
+
+    // include spacing
+    size_t spaces_count = node->child_count ? node->child_count - 1 : 0;
+    own.width.min += spaces_count * data->spacing.min;
+    
+    size_t max_spacing = data->spacing.max == ui_inf_length ? ui_inf_length : spaces_count * data->spacing.max;
+    if (own.width.max != ui_inf_length) own.width.max += max_spacing;
+
+    // if spacing may grow enable flex
+    if (data->spacing.flex != 0.0f) own.width.flex = 1.0f;
+
+    mc->measurements[idx] = own;
 }
 
-static inline void draw_column(const ui_draw_context* dctx, const ui_node* node, ui_transform world, void* uctx) {
-    if (!node->child_count) return; // return to avoid 0 divisions
-    const ui_column_data* data = node->data;
+static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node* node, size_t idx) {
+    // preindex children
+    size_t first_child_index = mc->last_used_index + 1;
+    mc->last_used_index     += node->child_count;
 
-    // local coordinate system
-    const float total_height = 1.0f;
-    const float y_top        = 1.0f;
-    const float y_bottom     = 0.0f;
-
-    // calculate children size
-    float total_children = 0.0f;
-    if (!(data->flags & ui_column_flag_not_uniform_height)) {
-        total_children = length_to_layout(data->height, dctx->resolution_y) * node->child_count;
-    }
-    else for (size_t i = 0; i < node->child_count; i++) {
-        total_children += length_to_layout(data->heights[i], dctx->resolution_y);
+    switch (node->type) {
+    case ui_node_padding: measure_padding(mc, node, idx, first_child_index); return;
+    case ui_node_sizebox: measure_sizebox(mc, node, idx, first_child_index); return;
+    case ui_node_row:     measure_row    (mc, node, idx, first_child_index); return;
     }
 
-    // calculate spacing size
-    float spacing, total_spacing;
-    if ((data->flags & 0x3) != ui_column_flag_align_justify) {
-        spacing       = length_to_layout(data->spacing, dctx->resolution_y);
-        total_spacing = spacing * (node->child_count - 1);
-    }
-    else {
-        total_spacing = total_height - total_children;
-        if (total_spacing < 0) total_spacing = 0.0f;
-        spacing = total_spacing / (node->child_count - 1);
-    }
-
-    // calculate total size
-    float total_size = total_spacing + total_children;
-
-    // find starting point, based on alligment
-    float y_cursor = y_top;
-    switch (data->flags & 0x3) {
-        case ui_column_flag_align_top:     y_cursor = y_top;                                       break;
-        case ui_column_flag_align_center:  y_cursor = y_top - (total_height - total_size) * 0.5f;  break;
-        case ui_column_flag_align_bottom:  y_cursor = y_bottom + total_children;                   break;
-        case ui_column_flag_align_justify: y_cursor = y_top;                                       break;
-    }
-
-    // layout children
-    for (size_t i = 0; i < node->child_count; i++) {
-        ui_length len = data->flags & ui_column_flag_not_uniform_height ? data->heights[i] : data->height;
-
-        // convert length to layout units
-        float heigth   = length_to_layout(len, dctx->resolution_y);
-        float y_center = y_cursor - heigth * 0.5f;
-
-        // local transform
-        ui_transform local = ui_default_trans;
-        local = ui_off(local, 0.0f, y_center);
-        local = ui_sca(local, 1.0f, heigth / 2);
-
-        draw_dispatch(dctx, &node->children[i], ui_mul(world, local), uctx);
-
-        // move cursor down
-        y_cursor -= heigth + spacing;
-    }
+    measure_span_on_children(mc, node, idx, first_child_index);
 }
 
-static void draw_input_box(const ui_draw_context* dctx, const ui_node* node, ui_transform world, void* uctx) {
-    ui_input_box_data* data = node->data;
-    data->private_transform = world;
+void ui_measure(ui_tree_info* ti) {
+    helper_measurement_walk_context mc;
+    mc.last_used_index = 0;
+    mc.measurements    = ti->measurements;
+
+    measure_dispatch(&mc, ti->root, 0);
+}
+
+// ===========================
+// Rendering
+
+// Transform + pixel dimensions helper
+//
+// The entire screen may be represented as a box in coordinate space:
+// (-1, -1) to (1, 1).
+//
+// The default transform for this space is `ui_default_trans` (identity)
+// The actual pixel resolution of the screen is provided at draw time
+//
+// When we apply a transform (scale) to render smaller UI widgets,
+// we also track the corresponding pixel resolution for that transformed area.
+//
+// This struct bundles both the transform and its associated pixel size.
+typedef struct helper_transform_pack {
+    int          pixel_width; 
+    int          pixel_height; 
+    ui_transform trans;
+} helper_transform_pack;
+
+// Scales helper_transform_pack - transforms both
+// member transform matrix, and the pixel info, so both match each other
+static inline helper_transform_pack helper_scale_pack_to_dim(helper_transform_pack pack, int pixels_width, int pixels_height) {
+    helper_transform_pack result;
+
+    result.trans = ui_sca(
+        pack.trans, 
+        ((float)pixels_width / pack.pixel_width), 
+        ((float)pixels_height / pack.pixel_height)
+    );
+
+    result.pixel_width  = pixels_width;
+    result.pixel_height = pixels_height;
+
+    return result;
+}
+
+// Lerp function
+static inline float helper_lerp(float a, float b, float t) {
+    return a + t * (b - a);
+}
+
+// Returns max(length minimum, min(length maximum, parent extend))
+static inline int helper_bound_length_in_parent(ui_length length, int parent_axis_length) {
+    int result = length.max;
+    result = helper_min(result, parent_axis_length);
+    result = helper_max(result, length.min);
+    return result;
+}
+
+// Returns sum of width flexes of given node's children
+static inline float helper_children_flexsum_width(const ui_measurement* measurements, size_t child_count, ui_node* children, size_t cidx) {
+    float flexsum = 0.0f;
+    for (size_t i = 0; i < child_count; i++) flexsum += measurements[cidx + i].width.flex;
+    return flexsum;
+}
+
+// Returns sum of height flexes of given node's children
+static inline float helper_children_flexsum_height(const ui_measurement* measurements, size_t child_count, ui_node* children, size_t cidx) {
+    float flexsum = 0.0f;
+    for (size_t i = 0; i < child_count; i++) flexsum += measurements[cidx + i].height.flex;
+    return flexsum;
+}
+
+typedef struct helper_rendering_walk_context {
+    size_t                last_used_index;    // see implementation note
+    const ui_measurement* measurements;       // read target
+    void*                 user_context;
+} helper_rendering_walk_context;
+
+// Function dispatching rendering based on node type
+// - rc   - rendering walk context
+// - node - current context
+// - idx  - tree order index
+// - trs  - all transformation informations
+// This function also index node children
+// All measure dispatch case functions have extra argument after idx
+// - cidx - first child index
+static void render_dispatch(
+    helper_rendering_walk_context* rc, const ui_node* node, size_t idx, helper_transform_pack trs
+);
+
+// Renders child nodes within the available space
+// - Children are drawn in the center of parent space
+// - Rendering respects parent and child measurements
+// - If the node has multiple children, their subtrees are rendered
+//   sequentially on top of each other (overlapping in the same space).
+static inline void render_default(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs) {
+    ui_measurement own_measure = rc->measurements[idx];
+
+    int own_width  = helper_bound_length_in_parent(own_measure.width,  trs.pixel_width);
+    int own_height = helper_bound_length_in_parent(own_measure.height, trs.pixel_height);
 
     for (size_t i = 0; i < node->child_count; i++) {
         const ui_node* child = &node->children[i];
-        draw_dispatch(dctx, child, world, uctx);
+        ui_measurement child_measure = rc->measurements[cidx + i];
+
+        int given_width = helper_bound_length_in_parent(
+            child_measure.width, own_width
+        );
+
+        int given_height = helper_bound_length_in_parent(
+            child_measure.height, own_height
+        );
+
+        render_dispatch(rc, child, cidx + i, helper_scale_pack_to_dim(trs, given_width, given_height));
     }
 }
 
-static void draw_dispatch(const ui_draw_context* dctx, const ui_node* node, ui_transform world, void* uctx) {
+// Render children padded
+// Each child is drawn separate, on top of previous
+// The padding may scale between [min, max]
+// But keep proportion in axis (between left and right, and top and bottom)
+static inline void render_padding(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs) {
+    const ui_padding_data* data = node->data;
+
+    for (size_t i = 0; i < node->child_count; i++) {
+        const ui_node* child = &node->children[i];
+        const ui_measurement* child_measurement = &rc->measurements[cidx + i];
+
+        int child_width  = child_measurement->width.min;
+        int child_height = child_measurement->height.min;
+
+        int free_width  = trs.pixel_width - child_width;
+        free_width = helper_min(free_width, data->left.max + data->right.max);      // upper bound
+        free_width = helper_max(free_width, data->left.min + data->right.min);      // lower bound
+
+        int free_height = trs.pixel_height - child_height;
+        free_height = helper_min(free_height, data->top.max + data->bottom.max);    // upper bound
+        free_height = helper_max(free_height, data->top.min + data->bottom.min);    // lower bound
+
+        // for even scaling compare target padding sizes and scale along
+        int max_padding_width = data->left.max + data->right.max;
+        int left  = free_width * ((float)data->left.max  / max_padding_width);
+        int right = free_width * ((float)data->right.max / max_padding_width);
+
+        int max_padding_height = data->top.max + data->bottom.max;
+        int top    = free_height * ((float)data->top.max    / max_padding_height);
+        int bottom = free_height * ((float)data->bottom.max / max_padding_height);
+
+        // find offsets from center
+        float screen_to_right = (float)(left - right) / trs.pixel_width;
+        float screen_to_top   = (float)(bottom - top) / trs.pixel_width;
+
+        // build transform
+        helper_transform_pack child_trs = trs;
+        child_trs.trans = ui_off(child_trs.trans, screen_to_right, screen_to_top);
+        child_trs = helper_scale_pack_to_dim(
+            child_trs, 
+            trs.pixel_width - left - right, 
+            trs.pixel_height - top - bottom
+        );
+
+        // render child
+        render_dispatch(rc, child, cidx + i, child_trs);
+    }
+}
+
+// Layouts and renders children in a sequence
+// Divides leftower space among children proportional to their flex values
+static inline void render_row(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs) {
+    const ui_row_data* data = node->data;
+    ui_measurement     row_measure = rc->measurements[idx];
+
+    // find flexsum
+    float flexsum = helper_children_flexsum_width(rc->measurements, node->child_count, node->children, cidx);
+    flexsum += data->spacing.flex;
+
+    // rendering variables
+    float screen_cursor, screen_spacing;
+    int   left_width, doflex;
+
+    // content exceed parent, draw with minimal sizes
+    if (row_measure.width.min > trs.pixel_width || flexsum == 0.0f) {
+        // find cursor begining
+        float cursor_interp_pixels = helper_lerp(0, (float)trs.pixel_width - row_measure.width.min, data->horizontal_align);
+        screen_cursor  = 2.0f * (cursor_interp_pixels / trs.pixel_width) - 1.0f;
+        screen_spacing = 2 * (float)data->spacing.min / trs.pixel_width;
+        left_width     = trs.pixel_width;
+        doflex         = 0;
+    }
+    // content does not exceed parent, extra space left
+    else {
+        screen_cursor = -1.0f;          // find cursor begining always at left since spanning entire parent
+        left_width = trs.pixel_width;   // set left width to entire parent
+
+        // find spacing
+        screen_spacing; {
+            int total_spacing = left_width * data->spacing.flex / flexsum;
+            total_spacing = helper_min(total_spacing, data->spacing.max); // upper bound
+            total_spacing = helper_max(total_spacing, data->spacing.min); // lower bound
+
+            left_width -= total_spacing;
+            flexsum    -= data->spacing.flex;
+
+            size_t spaces_count = node->child_count == 0 ? 0 : node->child_count - 1;
+            if (spaces_count != 0) screen_spacing = 2 * (float)total_spacing / spaces_count / trs.pixel_width;
+        }
+
+        // enable flexing
+        doflex = 1;
+    }
+
+    // render children
+    for (size_t i = 0; i < node->child_count; i++) {
+        const ui_node* child = &node->children[i];
+        const ui_measurement* child_measurement = &rc->measurements[cidx + i];
+
+        // find child dimension in pixels
+        int child_width = doflex
+            ? (child_measurement->width.max == ui_inf_length ? trs.pixel_width : child_measurement->width.max)
+            : child_measurement->width.min;
+
+        int child_height = helper_bound_length_in_parent(child_measurement->height, trs.pixel_height);
+
+        // take flex
+        if (doflex) {
+            int taken = left_width * (child_measurement->width.flex / flexsum);
+            taken = helper_min(taken, child_measurement->width.max); // upper bound
+            taken = helper_max(taken, child_width);                  // lower bound
+            child_width = taken;
+
+            left_width -= taken;
+            flexsum    -= child_measurement->width.flex;
+        }
+
+        // find child dimension on screen
+        float screen_child_width  = 2 * (float)child_width  / trs.pixel_width;
+        float screen_child_height = 2 * (float)child_height / trs.pixel_height;
+
+        // find vertical aligment offset
+        float screen_vertical_offset = helper_lerp(
+            1.0f - screen_child_height / 2.0f,  // top align
+            -1.0f + screen_child_height / 2.0f, // down align
+            data->vertical_align
+        );
+
+        // find child transformation
+        helper_transform_pack child_trs = trs;
+        child_trs.trans = ui_off(child_trs.trans, 
+            screen_cursor + screen_child_width / 2.0f, 
+            screen_vertical_offset
+        );
+        child_trs = helper_scale_pack_to_dim(child_trs, child_width, child_height);
+
+        // render child
+        render_dispatch(rc, child, cidx + i, child_trs);
+
+        // move cursor
+        screen_cursor += screen_child_width;
+        screen_cursor += screen_spacing;
+    }
+}
+
+static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, helper_transform_pack trs) {
+    // preindex children
+    size_t first_child_index = rc->last_used_index + 1;
+    rc->last_used_index     += node->child_count;
+
     switch (node->type) {
-        // Transfrom
-        case ui_node_render_transform: {
-            ui_transform new_world = ui_mul(world, *(ui_transform*)(node->data));
-            for (size_t i = 0; i < node->child_count; i++) {
-                const ui_node* child = &node->children[i];
-                draw_dispatch(dctx, child, new_world, uctx);
-            }
-        } break;
+    case ui_node_padding: render_padding(rc, node, idx, first_child_index, trs); return;
+    case ui_node_row:     render_row(rc, node, idx, first_child_index, trs);     return;
 
-        // Primitives
-        case ui_node_box: ui_draw_box(&world, node->data, uctx); goto draw_primitive_children;   
-        case ui_node_img: ui_draw_img(&world, node->data, uctx); goto draw_primitive_children;
-        case ui_node_txt: ui_draw_txt(&world, node->data, uctx); goto draw_primitive_children;
-        case ui_node_geo: ui_draw_geo(&world, node->data, uctx); goto draw_primitive_children;
-        case ui_node_blank:
-
-        // draw all children with same transformation
-        draw_primitive_children:
-            for (size_t i = 0; i < node->child_count; i++) {
-                const ui_node* child = &node->children[i];
-                draw_dispatch(dctx, child, world, uctx);
-            }
-        break;
-
-        // Padding
-        case ui_node_padding: draw_padding(dctx, node, world, uctx); break;
-
-        // Panels
-        case ui_node_row:     draw_row   (dctx, node, world, uctx); break;
-        case ui_node_column:  draw_column(dctx, node, world, uctx); break;
-
-        // Input Box
-        case ui_node_input_box: draw_input_box(dctx, node, world, uctx); break;
+    // for primitves call injected methods
+    case ui_node_box: {
+        ui_injection_render_box(trs.trans, trs.pixel_width, trs.pixel_height, node->data, rc->user_context);
+    } break;
     }
+
+    render_default(rc, node, idx, first_child_index, trs);
 }
 
-void ui_draw(const ui_draw_context* dctx, const ui_node* node, void* uctx) {
-    ui_transform world = ui_default_trans;
+void ui_render(ui_tree_info* ti) {
+    helper_transform_pack trs = {
+        .trans        = ui_default_trans,
+        .pixel_width  = ti->resolution_x,
+        .pixel_height = ti->resolution_y
+    };
 
-    // [-1, 1] -> [-0.5, 0.5]
-    ui_sca(world, 0.5f, 0.5f);
+    helper_rendering_walk_context rc = {
+        .last_used_index = 0,
+        .measurements    = ti->measurements
+    };
 
-    // [-0.5, 0.5] -> [0, 1]
-    ui_off(world, 0.5, 0.5);
-
-    draw_dispatch(dctx, node, world, uctx);
-}
-
-// ===========================
-// Input
-
-static inline int point_in_box(const ui_input_context* ctx, const ui_transform* t) {
-    // 1. mouse to normalized [0,1]
-    float mx = (float)ctx->mouse_position_x / (float)ctx->resolution_x;
-    float my = (float)ctx->mouse_position_y / (float)ctx->resolution_y;
-
-    // 2. compute inverse of 2x3 affine matrix
-    float det = t->m00 * t->m11 - t->m01 * t->m10;
-    if (det == 0.0f) return 0; // non-invertible
-
-    float inv_det = 1.0f / det;
-
-    // inverse matrix (without translation)
-    float im00 =  t->m11 * inv_det;
-    float im01 = -t->m01 * inv_det;
-    float im10 = -t->m10 * inv_det;
-    float im11 =  t->m00 * inv_det;
-
-    // inverse translation
-    float itx = -(im00 * t->tx + im01 * t->ty);
-    float ity = -(im10 * t->tx + im11 * t->ty);
-
-    // 3. transform mouse into local space
-    float lx = im00 * mx + im01 * my + itx;
-    float ly = im10 * mx + im11 * my + ity;
-
-    // 4. check box bounds (centered at 0, size = 2)
-    return (lx >= -1.0f && lx <= 1.0f &&
-            ly >= -1.0f && ly <= 1.0f);
-}
-
-static void input_dispatch(const ui_input_context* ictx, const ui_node* node, void* uctx);
-
-static inline void input_input_box(const ui_input_context* ictx, const ui_node* node, void* uctx) {
-    ui_input_box_data* data = node->data;
-    if (!data->input_callback) return;
-
-    int inside     = point_in_box(ictx, &data->private_transform);
-    int mouse_down = ictx->mouse_left_down;
-
-    // hover enter 
-    if (inside && !data->private_was_inside) {
-        data->input_callback(ictx, node, ui_input_event_enter);
-    }
-    // hover leave 
-    else if (!inside && data->private_was_inside) {
-        data->input_callback(ictx, node, ui_input_event_leave);
-    }
-    // hover (only if not entering this frame) 
-    else if (inside) {
-        data->input_callback(ictx, node, ui_input_event_hover);
-    }
-
-    // mouse down (press start) 
-    if (inside && mouse_down && !data->private_was_pressed) {
-        data->private_was_pressed = 1;
-        data->input_callback(ictx, node, ui_input_event_mouse_down);
-    }
-    // mouse held (only if not just pressed this frame) 
-    else if (data->private_was_pressed && mouse_down) {
-        data->input_callback(ictx, node, ui_input_event_mouse_held);
-    }
-    // mouse up 
-    else if (data->private_was_pressed && !mouse_down) {
-        data->private_was_pressed = 0;
-        data->input_callback(ictx, node, ui_input_event_mouse_up);
-    }
-
-    // scroll
-    if (inside && ictx->scroll_change != 0.0f) {
-        data->input_callback(ictx, node, ui_input_event_scroll);
-    }
-
-    // update hover state 
-    data->private_was_inside = inside;
-}
-
-void input_dispatch(const ui_input_context* ictx, const ui_node* node, void* uctx) {
-    if (node->type == ui_node_input_box) input_input_box(ictx, node, uctx);
-    for (size_t i = 0; i < node->child_count; i++) input_dispatch(ictx, &node->children[i], uctx);
-}
-
-void ui_input(const ui_input_context* ictx, const ui_node* node, void* uctx) {
-    input_dispatch(ictx, node, uctx);
+    render_dispatch(&rc, ti->root, 0, trs);
 }
 
 #endif
