@@ -73,16 +73,31 @@ static inline ui_transform ui_rot(ui_transform m, float deg_cw);
 // common
 
 typedef enum ui_node_type {
+    // Architectural
+
     ui_node_instance, // sets instance pointer to value of data
 
-    ui_node_blank,
+    // Render
 
+    ui_node_render_transform,  // transforms children at render
+
+    // Basic Layout
+
+    ui_node_measure_transform, // transforms children at measure and render
+    ui_node_blank,
     ui_node_padding, // padds children by given amount of pixels
     ui_node_sizebox, // pushes size constraint
 
+    // Containers
+
     ui_node_row,     // row component 
     ui_node_column,  // column component
+
+    // Primitives
+
     ui_node_box,     // box draw render primitive
+
+    // Extra Flags
 
     ui_node_data_instanced  = 1 << 6,
     ui_node_child_instanced = 1 << 7
@@ -106,6 +121,18 @@ typedef struct ui_node {
         size_t                  data_instance_offset;
     };
 } ui_node;
+
+// render transform data
+
+typedef struct ui_render_transform_data {
+    ui_transform transform;
+} ui_render_transform_data;
+
+// measure transform data
+
+typedef struct ui_measure_transform_data {
+    ui_transform transform;
+} ui_measure_transform_data;
 
 // padding
 
@@ -436,6 +463,85 @@ static inline void measure_span_on_children(helper_measurement_walk_context* mc,
     mc->measurements[idx] = own;
 }
 
+// Measure option for ui_node_measure_transform in three steps:
+// - Measure children with 'measure_span_on_children'
+// - Apply transform
+// - Find bounding box, and save it as own measurement
+static inline void measure_transform(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
+    measure_span_on_children(mc, node, idx, cidx);
+
+    const ui_measure_transform_data* data = helper_get_data(node, mc->instance);
+    ui_measurement* own = &mc->measurements[idx];
+
+        ui_transform t = data->transform;
+
+    // Helper to transform point
+    #define TRANSFORM_X(x, y) (t.m00 * (x) + t.m01 * (y) + t.tx)
+    #define TRANSFORM_Y(x, y) (t.m10 * (x) + t.m11 * (y) + t.ty)
+
+    // minimum size
+    {
+        float w = (float)own->width.min;
+        float h = (float)own->height.min;
+
+        float x0 = TRANSFORM_X(0, 0);
+        float y0 = TRANSFORM_Y(0, 0);
+
+        float x1 = TRANSFORM_X(w, 0);
+        float y1 = TRANSFORM_Y(w, 0);
+
+        float x2 = TRANSFORM_X(0, h);
+        float y2 = TRANSFORM_Y(0, h);
+
+        float x3 = TRANSFORM_X(w, h);
+        float y3 = TRANSFORM_Y(w, h);
+
+        float min_x = fminf(fminf(x0, x1), fminf(x2, x3));
+        float max_x = fmaxf(fmaxf(x0, x1), fmaxf(x2, x3));
+
+        float min_y = fminf(fminf(y0, y1), fminf(y2, y3));
+        float max_y = fmaxf(fmaxf(y0, y1), fmaxf(y2, y3));
+
+        own->width.min  = (int)ceilf(max_x - min_x);
+        own->height.min = (int)ceilf(max_y - min_y);
+    }
+
+    // maximum size
+    if (own->width.max != ui_inf_length && own->height.max != ui_inf_length) {
+        float w = (float)own->width.max;
+        float h = (float)own->height.max;
+
+        float x0 = TRANSFORM_X(0, 0);
+        float y0 = TRANSFORM_Y(0, 0);
+
+        float x1 = TRANSFORM_X(w, 0);
+        float y1 = TRANSFORM_Y(w, 0);
+
+        float x2 = TRANSFORM_X(0, h);
+        float y2 = TRANSFORM_Y(0, h);
+
+        float x3 = TRANSFORM_X(w, h);
+        float y3 = TRANSFORM_Y(w, h);
+
+        float min_x = fminf(fminf(x0, x1), fminf(x2, x3));
+        float max_x = fmaxf(fmaxf(x0, x1), fmaxf(x2, x3));
+
+        float min_y = fminf(fminf(y0, y1), fminf(y2, y3));
+        float max_y = fmaxf(fmaxf(y0, y1), fmaxf(y2, y3));
+
+        own->width.max  = (int)ceilf(max_x - min_x);
+        own->height.max = (int)ceilf(max_y - min_y);
+    } 
+    // if any axis is infinite stay infinite
+    else { 
+        own->width.max  = ui_inf_length;
+        own->height.max = ui_inf_length;
+    }
+
+    #undef TRANSFORM_X
+    #undef TRANSFORM_Y
+}
+
 // Measure option for ui_node_padding in two steps:
 // - Measure children with 'measure_span_on_children'
 // - Extend each axis by padding
@@ -443,7 +549,7 @@ static inline void measure_padding(helper_measurement_walk_context* mc, const ui
     measure_span_on_children(mc, node, idx, cidx);
 
     const ui_padding_data* data = helper_get_data(node, mc->instance);
-    ui_measurement*        own  = &mc->measurements[idx];
+    ui_measurement* own  = &mc->measurements[idx];
 
     own->width.min  += data->left.min + data->right.min;
     if (own->width.max != ui_inf_length) own->width.max  += data->left.max + data->right.max;
@@ -596,6 +702,8 @@ static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node*
 
         mc->instance = old_instance;
     } return;
+
+    case ui_node_measure_transform: measure_transform(mc, node, idx, first_child_index); return;
     case ui_node_padding: measure_padding(mc, node, idx, first_child_index); return;
     case ui_node_sizebox: measure_sizebox(mc, node, idx, first_child_index); return;
     case ui_node_row:     measure_row    (mc, node, idx, first_child_index); return;
@@ -1001,6 +1109,13 @@ static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* no
 
         rc->instance = old_instance;
     } return;
+
+    // transform matrix, then continue
+    case ui_node_render_transform: 
+    case ui_node_measure_transform: {
+        const ui_render_transform_data* data = helper_get_data(node, rc->instance);
+        trs.trans = ui_mul(trs.trans, data->transform);
+    } break;
 
     case ui_node_padding: render_padding(rc, node, idx, first_child_index, trs); return;
     case ui_node_row:     render_row(rc, node, idx, first_child_index, trs);     return;
