@@ -81,6 +81,7 @@ typedef enum ui_node_type {
     ui_node_sizebox, // pushes size constraint
 
     ui_node_row,     // row component 
+    ui_node_column,  // column component
     ui_node_box,     // box draw render primitive
 
     ui_node_data_instanced  = 1 << 6,
@@ -142,6 +143,14 @@ typedef struct ui_row_data {
     float     vertical_align;   // 0 - align top,  0.5 - align center, 1.0 - align bottom, other values also work
     ui_length spacing;          // spacing between childrens
 } ui_row_data;
+
+// column
+
+typedef struct ui_column_data {
+    float     vertical_align;   // 0 - align top,  0.5 - align center, 1.0 - align bottom, other values also work
+    float     horizontal_align; // 0 - align left, 0.5 - align center, 1.0 - align right,  other values also work
+    ui_length spacing;          // spacing between childrens
+} ui_column_data;
 
 // ===========================
 // Api
@@ -486,9 +495,8 @@ static inline void measure_row(helper_measurement_walk_context* mc, const ui_nod
     };
 
     for (size_t i = 0; i < child_count; i++) {
-        const ui_node*        child  = &children[i];
+        measure_dispatch(mc, &children[i], cidx + i);
         const ui_measurement* result = &mc->measurements[cidx + i];
-        measure_dispatch(mc, child, cidx + i);
 
         own.width.min += result->width.min;
 
@@ -520,6 +528,60 @@ static inline void measure_row(helper_measurement_walk_context* mc, const ui_nod
     mc->measurements[idx] = own;
 }
 
+// Measure option for ui_node_column
+//
+// Width:
+// - minimum = max over children
+// - maximum = max over children
+// - flex    = 1.0f if at least one child non zero flex else 0
+//
+// Height:
+// - minimum = sum over children + spacing minimum
+// - maximum = clamp(sum over children + spacing maximum, inf)
+// - flex    = 1.0f if at least one child or column.spacing have non zero flex else 0
+static inline void measure_column(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
+    size_t                child_count = helper_get_child_count(node, mc->instance);
+    const ui_node*        children    = helper_get_children(node, mc->instance);
+    const ui_column_data* data        = helper_get_data(node, mc->instance);
+
+    ui_measurement own = {
+        .width  = {0, 0, 0.0f},
+        .height = {0, 0, 0.0f}
+    };
+
+    for (size_t i = 0; i < child_count; i++) {
+        measure_dispatch(mc, &children[i], cidx + i);
+        const ui_measurement* result = &mc->measurements[cidx + i];
+
+        own.height.min += result->height.min;
+
+        // overflow check, children are likely to return inf in max field
+        // if so, clamp to inf
+        if (own.height.max == ui_inf_length || result->height.max == ui_inf_length) own.height.max = ui_inf_length;
+        else own.height.max += result->height.max;
+
+        if (result->height.flex != 0.0f) own.height.flex = 1.0f;
+
+        own.width.min = helper_max(own.width.min, result->width.min);
+        own.width.max = helper_max(own.width.max, result->width.max);
+
+        // enable flex if child do flex
+        if (result->width.flex != 0.0f) own.width.flex = 1.0f;
+    }
+
+    // include spacing
+    size_t spaces_count = child_count ? child_count - 1 : 0;
+    own.height.min += spaces_count * data->spacing.min;
+
+    size_t max_spacing = data->spacing.max == ui_inf_length ? ui_inf_length : spaces_count * data->spacing.max;
+    if (own.height.max != ui_inf_length) own.height.max += max_spacing;
+
+    // if spacing may grow enable flex
+    if (data->spacing.flex != 0.0f) own.height.flex = 1.0f;
+
+    mc->measurements[idx] = own;
+}
+
 static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node* node, size_t idx) {
     // preindex children
     size_t first_child_index = mc->last_used_index + 1;
@@ -537,6 +599,7 @@ static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node*
     case ui_node_padding: measure_padding(mc, node, idx, first_child_index); return;
     case ui_node_sizebox: measure_sizebox(mc, node, idx, first_child_index); return;
     case ui_node_row:     measure_row    (mc, node, idx, first_child_index); return;
+    case ui_node_column:  measure_column (mc, node, idx, first_child_index); return;
     }
 
     measure_span_on_children(mc, node, idx, first_child_index);
@@ -739,6 +802,8 @@ static inline void render_row(helper_rendering_walk_context* rc, const ui_node* 
         // find cursor begining
         float cursor_interp_pixels = helper_lerp(0, (float)trs.pixel_width - row_measure.width.min, data->horizontal_align);
         screen_cursor  = 2.0f * (cursor_interp_pixels / trs.pixel_width) - 1.0f;
+
+        // init other values
         screen_spacing = 2 * (float)data->spacing.min / trs.pixel_width;
         left_width     = trs.pixel_width;
         doflex         = 0;
@@ -750,14 +815,17 @@ static inline void render_row(helper_rendering_walk_context* rc, const ui_node* 
 
         // find spacing
         screen_spacing; {
-            int total_spacing = left_width * data->spacing.flex / flexsum;
-            total_spacing = helper_min(total_spacing, data->spacing.max); // upper bound
-            total_spacing = helper_max(total_spacing, data->spacing.min); // lower bound
+            size_t spaces_count = child_count == 0 ? 0 : child_count - 1;
+
+            int total_spacing = left_width * data->spacing.flex / flexsum; // all spacers
+            total_spacing = helper_min(total_spacing, 
+                data->spacing.max == ui_inf_length ? ui_inf_length : spaces_count * data->spacing.max
+            ); // upper bound
+            total_spacing = helper_max(total_spacing, spaces_count * data->spacing.min); // lower bound
 
             left_width -= total_spacing;
             flexsum    -= data->spacing.flex;
 
-            size_t spaces_count = child_count == 0 ? 0 : child_count - 1;
             if (spaces_count != 0) screen_spacing = 2 * (float)total_spacing / spaces_count / trs.pixel_width;
         }
 
@@ -816,6 +884,109 @@ static inline void render_row(helper_rendering_walk_context* rc, const ui_node* 
     }
 }
 
+// Layouts and renders children in a sequence
+// Divides lower space among children proportional to their flex values
+static inline void render_column(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs) {
+    size_t                child_count = helper_get_child_count(node, rc->instance);
+    const ui_node*        children    = helper_get_children(node, rc->instance);
+    const ui_column_data* data        = helper_get_data(node, rc->instance);
+    ui_measurement        col_measure = rc->measurements[idx];
+
+    // find flexsum
+    float flexsum = helper_children_flexsum_height(rc->measurements, child_count, children, cidx);
+    flexsum += data->spacing.flex;
+
+    // rendering variables
+    float screen_cursor, screen_spacing;
+    int   left_height, doflex;
+
+    // content exceed parent, draw with minimal sizes
+    if (col_measure.height.min > trs.pixel_height || flexsum == 0.0f) {
+        // find cursor beginning
+        float cursor_interp_pixels = helper_lerp(0, (float)trs.pixel_height - col_measure.height.min, data->vertical_align);
+        screen_cursor  = 2.0f * (cursor_interp_pixels / trs.pixel_height) - 1.0f;
+
+        // init other values
+        screen_spacing = 2 * (float)data->spacing.min / trs.pixel_height;
+        left_height    = trs.pixel_height;
+        doflex         = 0;
+    }
+    // content does not exceed parent, extra space left
+    else {
+        screen_cursor = 1.0f; // start at top
+        left_height   = trs.pixel_height;
+
+        // find spacing
+        screen_spacing; {
+            size_t spaces_count = child_count == 0 ? 0 : child_count - 1;
+
+            int total_spacing = left_height * data->spacing.flex / flexsum; // all spacers
+            total_spacing = helper_min(total_spacing, 
+                data->spacing.max == ui_inf_length ? ui_inf_length : spaces_count * data->spacing.max
+            ); // upper bound
+            total_spacing = helper_max(total_spacing, spaces_count * data->spacing.min); // lower bound
+
+            left_height -= total_spacing;
+            flexsum     -= data->spacing.flex;
+            
+            if (spaces_count != 0) screen_spacing = 2 * (float)total_spacing / spaces_count / trs.pixel_height;
+        }
+
+        // enable flexing
+        doflex = 1;
+    }
+
+    // render children
+    for (size_t i = 0; i < child_count; i++) {
+        const ui_node* child = &children[i];
+        const ui_measurement* child_measurement = &rc->measurements[cidx + i];
+
+        // find child dimension in pixels
+        int child_height = doflex
+            ? (child_measurement->height.max == ui_inf_length ? trs.pixel_height : child_measurement->height.max)
+            : child_measurement->height.min;
+
+        int child_width = helper_bound_length_in_parent(child_measurement->width, trs.pixel_width);
+
+        // take flex
+        if (doflex) {
+            int taken = left_height * (child_measurement->height.flex / flexsum);
+            taken = helper_min(taken, child_measurement->height.max); // upper bound
+            taken = helper_max(taken, child_height);                  // lower bound
+            child_height = taken;
+
+            left_height -= taken;
+            flexsum     -= child_measurement->height.flex;
+        }
+
+        // find child dimension on screen
+        float screen_child_width  = 2 * (float)child_width  / trs.pixel_width;
+        float screen_child_height = 2 * (float)child_height / trs.pixel_height;
+
+        // find horizontal alignment offset
+        float screen_horizontal_offset = helper_lerp(
+            -1.0f + screen_child_width / 2.0f,  // left align
+             1.0f - screen_child_width / 2.0f,  // right align
+            data->horizontal_align
+        );
+
+        // find child transformation
+        helper_transform_pack child_trs = trs;
+        child_trs.trans = ui_off(child_trs.trans,
+            screen_horizontal_offset,
+            screen_cursor - screen_child_height / 2.0f
+        );
+        child_trs = helper_scale_pack_to_dim(child_trs, child_width, child_height);
+
+        // render child
+        render_dispatch(rc, child, cidx + i, child_trs);
+
+        // move cursor (downward)
+        screen_cursor -= screen_child_height;
+        screen_cursor -= screen_spacing;
+    }
+}
+
 static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, helper_transform_pack trs) {
     // preindex children
     size_t first_child_index = rc->last_used_index + 1;
@@ -833,6 +1004,7 @@ static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* no
 
     case ui_node_padding: render_padding(rc, node, idx, first_child_index, trs); return;
     case ui_node_row:     render_row(rc, node, idx, first_child_index, trs);     return;
+    case ui_node_column:  render_column(rc, node, idx, first_child_index, trs);  return;
 
     // for primitves call injected methods
     case ui_node_box: {
