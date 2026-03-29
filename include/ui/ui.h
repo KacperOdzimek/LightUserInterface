@@ -240,7 +240,7 @@ static inline ui_transform ui_mul(ui_transform p, ui_transform c) {
 
 #ifdef UI_IMPL_INVERT_ROTATION
 // compile time deg to rad conversion
-#define DEG_TO_RAD(deg_cw) \
+#define UI_DEG_TO_RAD(deg_cw) \
     ((((UI_FMOD_APPROX((deg_cw), 360.0f) * 0.017453292519943295f) > 3.14159265f) ? \
         ((UI_FMOD_APPROX((deg_cw), 360.0f) * 0.017453292519943295f) - 6.28318531f) : \
         (((UI_FMOD_APPROX((deg_cw), 360.0f) * 0.017453292519943295f) < -3.14159265f) ? \
