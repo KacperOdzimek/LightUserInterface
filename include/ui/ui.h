@@ -412,6 +412,11 @@ static inline int helper_min(int a, int b) {
     return a < b ? a : b;
 }
 
+// linear interpolation function
+static inline float helper_lerp(float a, float b, float t) {
+    return a + t * (b - a);
+}
+
 // ===========================
 // Subtree
 
@@ -825,11 +830,6 @@ static inline helper_transform_pack helper_scale_pack_to_dim(helper_transform_pa
     return result;
 }
 
-// Lerp function
-static inline float helper_lerp(float a, float b, float t) {
-    return a + t * (b - a);
-}
-
 // Returns max(length minimum, min(length maximum, parent extend))
 static inline int helper_bound_length_in_parent(ui_length length, int parent_axis_length) {
     int result = length.max;
@@ -862,11 +862,20 @@ typedef struct helper_rendering_walk_context {
     size_t                      last_used_index;        // see implementation note
     const helper_measurement*   measurements;           // read target
 
+    size_t                      temp_cap;
     size_t                      temp_pos;
     char*                       temp_mem;
 
     void*                       user_context;
 } helper_rendering_walk_context;
+
+// Allocates first free given amount of bytes in temp memory
+// if it is not possilbe, longjmp to ui_render
+static inline char* helper_temp_mem_arena_alloc(helper_rendering_walk_context* rc, size_t bytes) {
+    if (rc->temp_pos + bytes >= rc->temp_cap) longjmp(rc->ui_render_call_frame, 1);
+    char* result = rc->temp_mem; rc->temp_pos += bytes;
+    return result;
+}
 
 // Function dispatching rendering based on node type
 // - rc   - rendering walk context
@@ -965,7 +974,7 @@ static inline void render_row
 (helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs) {
     const ui_node_array children    = helper_get_node_children_array(node, rc->instance);
     const ui_row_data*  data        = helper_get_data(node, rc->instance);
-    helper_measurement      row_measure = rc->measurements[idx];
+    helper_measurement  row_measure = rc->measurements[idx];
 
     // find flexsum
     float flexsum = helper_children_flexsum_width(rc->measurements, children.count, children.nodes, cidx);
@@ -1218,6 +1227,7 @@ void ui_render(ui_tree_info* ti) {
     helper_rendering_walk_context rc = {
         .instance        = 0x0,
         .last_used_index = 0,
+        .temp_cap        = ti->temp_capacity,
         .temp_pos        = temp_pos,
         .temp_mem        = ti->temp_memory,
         .measurements    = (helper_measurement*)(ti->temp_memory + sizeof(size_t)),
