@@ -102,24 +102,28 @@ typedef enum ui_node_type {
     ui_node_child_instanced = 1 << 7
 } ui_node_type;
 
+typedef struct ui_node ui_node;
+typedef struct ui_node_array ui_node_array;
+
 typedef struct ui_node {
     ui_node_type type;
 
     union {
-        size_t                  child_count;
-        size_t                  child_count_instance_offset;
-    };
-    
-    union {
-        const struct ui_node*   children;
-        size_t                  children_instance_offset;
+        const ui_node*          child;
+        const ui_node_array*    child_array;
+        size_t                  child_instance_offset;
     };
 
     union {
-        const void*             data;
-        size_t                  data_instance_offset;
+        const void*     data;
+        size_t          data_instance_offset;
     };
 } ui_node;
+
+typedef struct ui_node_array {
+    size_t   count;
+    ui_node* nodes;
+} ui_node_array;
 
 // transform data
 
@@ -328,8 +332,9 @@ static inline ui_transform ui_mul(ui_transform p, ui_transform c) {
 #ifdef UI_IMPL
 
 /*
-    Important implementation note!
-    In both measure and render passes the tree is walked IN THE SAME ORDER
+    Important implementation notes!
+
+    1) In both measure and render passes the tree is walked IN THE SAME ORDER
     This is to assure consistient indexation of children nodes
 
     Rules:
@@ -346,26 +351,41 @@ static inline ui_transform ui_mul(ui_transform p, ui_transform c) {
     3  4  5 6
 
     The last used index is saved inside walk context
+
+    2) On adding new node check:
+    - Node info helpers
+    - Measure dispatch
+    - Render dispatch
 */
 
 // ===========================
-// Node access helpers
+// Node helpers
 
-static const unsigned char NODE_TYPE_MASK = (unsigned char)(ui_node_data_instanced - 1);
+static const unsigned char NODE_TYPE_NO_FLAG_MASK = (unsigned char)(ui_node_data_instanced - 1);
+
+static inline int helper_is_single_childed(ui_node_type type) {
+    type &= NODE_TYPE_NO_FLAG_MASK;
+
+    switch (type) {
+    case ui_node_row: case ui_node_column: return 0;
+    }
+
+    return 1;
+}
 
 static inline const void* helper_get_data(const ui_node* node, const char* instance) {
     if (node->type & ui_node_data_instanced) return (void*)(instance + node->data_instance_offset);
     return node->data;
 }
 
-static inline size_t helper_get_child_count(const ui_node* node, const char* instance) {
-    if (node->type & ui_node_child_instanced) return *(size_t*)(instance + node->child_count_instance_offset);
-    return node->child_count;
+static inline const ui_node* helper_get_node_single_child(const ui_node* node, const char* instance) {
+    if (!(node->type & ui_node_child_instanced)) return node->child;
+    return *(const ui_node**)(instance + node->child_instance_offset);
 }
 
-static inline const const ui_node* helper_get_children(const ui_node* node, const char* instance) {
-    if (node->type & ui_node_child_instanced) return *(const ui_node**)(instance + node->children_instance_offset);
-    return node->children;
+static inline const ui_node_array helper_get_node_children_array(const ui_node* node, const char* instance) {
+    if (!(node->type & ui_node_child_instanced)) return *node->child_array;
+    return **(const ui_node_array**)(instance + node->child_instance_offset);
 }
 
 // ===========================
@@ -376,22 +396,31 @@ typedef struct helper_subtree_walk_context {
 } helper_subtree_walk_context;
 
 static size_t subtree_dispatch(helper_subtree_walk_context* sc, const ui_node* node) {
-    size_t          child_count = helper_get_child_count(node, sc->instance);
-    const ui_node*  children    = helper_get_children(node, sc->instance);
+    // instance case - change instance and recurse
+    if ((node->type & NODE_TYPE_NO_FLAG_MASK) == ui_node_instance) {
+        // load a child while still in previous instance
+        const ui_node* child = helper_get_node_single_child(node, sc->instance);
 
-    if ((node->type & NODE_TYPE_MASK) == ui_node_instance) {
         const void* old_instance = sc->instance;
         sc->instance = helper_get_data(node, sc->instance);
 
         size_t res = 1; 
-        for (size_t i = 0; i < child_count; i++) res += subtree_dispatch(sc, &children[i]);
+        if (child) res += subtree_dispatch(sc, child);
 
         sc->instance = old_instance;
         return res;
     }
 
-    size_t res = 1; 
-    for (size_t i = 0; i < child_count; i++) res += subtree_dispatch(sc,  &children[i]);
+    // recurse to single child
+    if (helper_is_single_childed(node->type)) {
+        const ui_node* child = helper_get_node_single_child(node, sc->instance);
+        if (child) return 1 + subtree_dispatch(sc, child);
+        return 1;
+    }
+
+    // recurse into array of childrens
+    const ui_node_array children = helper_get_node_children_array(node, sc->instance);
+    size_t res = 1;  for (size_t i = 0; i < children.count; i++) res += subtree_dispatch(sc,  &children.nodes[i]);
     return res;
 }
 
@@ -431,42 +460,38 @@ typedef struct helper_measurement_walk_context {
 // - cidx - first child index
 static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node* node, size_t idx);
 
-// Default measure option
-// If no children, defaults to (ui_length){0, inf, 1.0f} on both axes
-// Else for both axes:
-// - minimum = max minimum dim among children
-// - maximum = min maximum dim among children
-// - flex        = 1.0f (function meant for primitives like boxes that shall always span)
-static inline void measure_span_on_children(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
-    size_t          child_count = helper_get_child_count(node, mc->instance);
-    const ui_node*  children    = helper_get_children(node, mc->instance);
+// See measure_copy_child_or_fill
+// Exposed for ui_node_transform dispatch
+static inline void measure_copy_child_or_fill_given_child
+(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx, const ui_node* child) {
+    ui_measurement* own = &mc->measurements[idx];
 
-    ui_measurement own = {
+    if (child) {
+        measure_dispatch(mc, child, cidx);
+        *own = mc->measurements[cidx];
+        return;
+    }
+
+    *own = (ui_measurement){
         .width  = {0, ui_inf_length, 1.0f},
         .height = {0, ui_inf_length, 1.0f}
     };
+}
 
-    for (size_t i = 0; i < child_count; i++) {
-        const ui_node*        child  = &children[i];
-        const ui_measurement* result = &mc->measurements[cidx + i];
-        measure_dispatch(mc, child, cidx + i);
-
-        own.width.min  = helper_max(own.width.min, result->width.min);
-        own.width.max  = helper_min(own.width.max, result->width.max);
-
-        own.height.min = helper_max(own.height.min, result->height.min);
-        own.height.max = helper_min(own.height.max, result->height.max);
-    }
-
-    mc->measurements[idx] = own;
+// Basic measure option for single childed nodes
+// If node have child, the parent node measurement is set to child's measurement
+// Else node's measurement is set to (ui_length){0, inf, 1.0f} in both axes
+static inline void measure_copy_child_or_fill(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
+    const ui_node* child = helper_get_node_single_child(node, mc->instance);
+    measure_copy_child_or_fill_given_child(mc, node, idx, cidx, child);
 }
 
 // Measure option for ui_node_measure_transform in three steps:
-// - Measure children with 'measure_span_on_children'
+// - Measure child 'measure_copy_child_or_fill'
 // - Apply transform
 // - Find bounding box, and save it as own measurement
 static inline void measure_transform(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
-    measure_span_on_children(mc, node, idx, cidx);
+    measure_copy_child_or_fill(mc, node, idx, cidx);
 
     const ui_transform_data* data = helper_get_data(node, mc->instance);
     ui_measurement* own = &mc->measurements[idx];
@@ -544,10 +569,10 @@ static inline void measure_transform(helper_measurement_walk_context* mc, const 
 }
 
 // Measure option for ui_node_padding in two steps:
-// - Measure children with 'measure_span_on_children'
+// - Measure children with 'measure_copy_child_or_fill'
 // - Extend each axis by padding
 static inline void measure_padding(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
-    measure_span_on_children(mc, node, idx, cidx);
+    measure_copy_child_or_fill(mc, node, idx, cidx);
 
     const ui_padding_data* data = helper_get_data(node, mc->instance);
     ui_measurement* own  = &mc->measurements[idx];
@@ -563,10 +588,10 @@ static inline void measure_padding(helper_measurement_walk_context* mc, const ui
 }
 
 // Measure option for ui_node_sizebox in two steps:
-// - Measure children with 'measure_span_on_children'
+// - Measure children with 'measure_copy_child_or_fill'
 // - Overwrite specified by data->flag fields with values from data
 static inline void measure_sizebox(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
-    measure_span_on_children(mc, node, idx, cidx);
+    measure_copy_child_or_fill(mc, node, idx, cidx);
 
     const ui_sizebox_data* data = helper_get_data(node, mc->instance);
     ui_measurement*        own  = &mc->measurements[idx];
@@ -592,17 +617,16 @@ static inline void measure_sizebox(helper_measurement_walk_context* mc, const ui
 // - maximum = max over children
 // - flex    = 1.0f if at least one child non zero flex else 0
 static inline void measure_row(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
-    size_t              child_count = helper_get_child_count(node, mc->instance);
-    const ui_node*      children    = helper_get_children(node, mc->instance);
-    const ui_row_data*  data        = helper_get_data(node, mc->instance);
+    const ui_node_array children = helper_get_node_children_array(node, mc->instance);
+    const ui_row_data*  data     = helper_get_data(node, mc->instance);
 
     ui_measurement own = {
         .width  = {0, 0, 0.0f},
         .height = {0, 0, 0.0f}
     };
 
-    for (size_t i = 0; i < child_count; i++) {
-        measure_dispatch(mc, &children[i], cidx + i);
+    for (size_t i = 0; i < children.count; i++) {
+        measure_dispatch(mc, &children.nodes[i], cidx + i);
         const ui_measurement* result = &mc->measurements[cidx + i];
 
         own.width.min += result->width.min;
@@ -623,7 +647,7 @@ static inline void measure_row(helper_measurement_walk_context* mc, const ui_nod
     }
 
     // include spacing
-    size_t spaces_count = child_count ? child_count - 1 : 0;
+    size_t spaces_count = children.count ? children.count - 1 : 0;
     own.width.min += spaces_count * data->spacing.min;
     
     size_t max_spacing = data->spacing.max == ui_inf_length ? ui_inf_length : spaces_count * data->spacing.max;
@@ -647,17 +671,16 @@ static inline void measure_row(helper_measurement_walk_context* mc, const ui_nod
 // - maximum = clamp(sum over children + spacing maximum, inf)
 // - flex    = 1.0f if at least one child or column.spacing have non zero flex else 0
 static inline void measure_column(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
-    size_t                child_count = helper_get_child_count(node, mc->instance);
-    const ui_node*        children    = helper_get_children(node, mc->instance);
-    const ui_column_data* data        = helper_get_data(node, mc->instance);
+    const ui_node_array   children = helper_get_node_children_array(node, mc->instance);
+    const ui_column_data* data     = helper_get_data(node, mc->instance);
 
     ui_measurement own = {
         .width  = {0, 0, 0.0f},
         .height = {0, 0, 0.0f}
     };
 
-    for (size_t i = 0; i < child_count; i++) {
-        measure_dispatch(mc, &children[i], cidx + i);
+    for (size_t i = 0; i < children.count; i++) {
+        measure_dispatch(mc, &children.nodes[i], cidx + i);
         const ui_measurement* result = &mc->measurements[cidx + i];
 
         own.height.min += result->height.min;
@@ -677,7 +700,7 @@ static inline void measure_column(helper_measurement_walk_context* mc, const ui_
     }
 
     // include spacing
-    size_t spaces_count = child_count ? child_count - 1 : 0;
+    size_t spaces_count = children.count ? children.count - 1 : 0;
     own.height.min += spaces_count * data->spacing.min;
 
     size_t max_spacing = data->spacing.max == ui_inf_length ? ui_inf_length : spaces_count * data->spacing.max;
@@ -690,17 +713,22 @@ static inline void measure_column(helper_measurement_walk_context* mc, const ui_
 }
 
 static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node* node, size_t idx) {
-    // preindex children
+    // allocate contiguous block of indices for own children
     size_t first_child_index = mc->last_used_index + 1;
-    mc->last_used_index += helper_get_child_count(node, mc->instance);
+    if (helper_is_single_childed(node->type)) {
+        if (helper_get_node_single_child(node, mc->instance)) mc->last_used_index++;   
+    } 
+    else mc->last_used_index += helper_get_node_children_array(node, mc->instance).count;
 
-    switch (node->type & NODE_TYPE_MASK) {
+    // dispatch
+    switch (node->type & NODE_TYPE_NO_FLAG_MASK) {
     case ui_node_instance: {
+        // load a child while still in previous instance
+        const ui_node* child = helper_get_node_single_child(node, mc->instance);
+
         const void* old_instance = mc->instance;
         mc->instance = helper_get_data(node, mc->instance);
-
-        measure_span_on_children(mc, node, idx, first_child_index);
-
+        measure_copy_child_or_fill_given_child(mc, node, idx, first_child_index, child);
         mc->instance = old_instance;
     } return;
 
@@ -711,7 +739,7 @@ static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node*
     case ui_node_column:    measure_column (mc, node, idx, first_child_index); return;
     }
 
-    measure_span_on_children(mc, node, idx, first_child_index);
+    measure_copy_child_or_fill(mc, node, idx, first_child_index);
 }
 
 void ui_measure(ui_tree_info* ti) {
@@ -806,100 +834,99 @@ typedef struct helper_rendering_walk_context {
 // This function also index node children
 // All measure dispatch case functions have extra argument after idx
 // - cidx - first child index
-static void render_dispatch(
-    helper_rendering_walk_context* rc, const ui_node* node, size_t idx, helper_transform_pack trs
-);
+static void render_dispatch
+(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, helper_transform_pack trs);
 
-// Renders child nodes within the available space
-// - Children are drawn in the center of parent space
-// - Rendering respects parent and child measurements
-// - If the node has multiple children, their subtrees are rendered
-//   sequentially on top of each other (overlapping in the same space).
-static inline void render_default(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs) {
-    size_t         child_count = helper_get_child_count(node, rc->instance);
-    const ui_node* children    = helper_get_children(node, rc->instance);
-    ui_measurement own_measure = rc->measurements[idx];
+// Read render_pass_to_single_child
+// This part is exposed for ui_node_transform
+static inline void render_pass_to_single_child_given_child
+(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs, const ui_node* child) {
+    if (!child) return;
+
+    ui_measurement own_measure   = rc->measurements[idx];
+    ui_measurement child_measure = rc->measurements[cidx];
 
     int own_width  = helper_bound_length_in_parent(own_measure.width,  trs.pixel_width);
     int own_height = helper_bound_length_in_parent(own_measure.height, trs.pixel_height);
 
-    for (size_t i = 0; i < child_count; i++) {
-        const ui_node* child = &children[i];
-        ui_measurement child_measure = rc->measurements[cidx + i];
+    int given_width = helper_bound_length_in_parent(
+        child_measure.width, own_width
+    );
 
-        int given_width = helper_bound_length_in_parent(
-            child_measure.width, own_width
-        );
+    int given_height = helper_bound_length_in_parent(
+        child_measure.height, own_height
+    );
 
-        int given_height = helper_bound_length_in_parent(
-            child_measure.height, own_height
-        );
-
-        render_dispatch(rc, child, cidx + i, helper_scale_pack_to_dim(trs, given_width, given_height));
-    }
+    render_dispatch(rc, child, cidx, helper_scale_pack_to_dim(trs, given_width, given_height));
 }
 
-// Render children padded
-// Each child is drawn separate, on top of previous
+// Works for single childed nodes
+// Passes rendering process to child
+// With regard for own and child measurements
+static inline void render_pass_to_single_child
+(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs) {
+    const ui_node* child = helper_get_node_single_child(node, rc->instance);
+    render_pass_to_single_child_given_child(rc, node, idx, cidx, trs, child);
+}
+
+// Render child padded
 // The padding may scale between [min, max]
 // But keep proportion in axis (between left and right, and top and bottom)
-static inline void render_padding(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs) {
-    size_t                  child_count = helper_get_child_count(node, rc->instance);
-    const ui_node*          children    = helper_get_children(node, rc->instance);
-    const ui_padding_data*  data        = helper_get_data(node, rc->instance);
+static inline void render_padding
+(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs) {
+    const ui_node*         child = helper_get_node_single_child(node, rc->instance);
+    const ui_padding_data* data  = helper_get_data(node, rc->instance);
+    if (!child) return;
+    
+    const ui_measurement* child_measurement = &rc->measurements[cidx];
 
-    for (size_t i = 0; i < child_count; i++) {
-        const ui_node* child = &children[i];
-        const ui_measurement* child_measurement = &rc->measurements[cidx + i];
+    // find maximum free sizes
+    int child_width  = child_measurement->width.min;
+    int child_height = child_measurement->height.min;
 
-        int child_width  = child_measurement->width.min;
-        int child_height = child_measurement->height.min;
+    int free_width  = trs.pixel_width - child_width;
+    free_width = helper_min(free_width, data->left.max + data->right.max);      // upper bound
+    free_width = helper_max(free_width, data->left.min + data->right.min);      // lower bound
 
-        int free_width  = trs.pixel_width - child_width;
-        free_width = helper_min(free_width, data->left.max + data->right.max);      // upper bound
-        free_width = helper_max(free_width, data->left.min + data->right.min);      // lower bound
+    int free_height = trs.pixel_height - child_height;
+    free_height = helper_min(free_height, data->top.max + data->bottom.max);    // upper bound
+    free_height = helper_max(free_height, data->top.min + data->bottom.min);    // lower bound
 
-        int free_height = trs.pixel_height - child_height;
-        free_height = helper_min(free_height, data->top.max + data->bottom.max);    // upper bound
-        free_height = helper_max(free_height, data->top.min + data->bottom.min);    // lower bound
+    // for even scaling compare target padding sizes and scale along
+    int max_padding_width = data->left.max + data->right.max;
+    int left  = free_width * ((float)data->left.max  / max_padding_width);
+    int right = free_width * ((float)data->right.max / max_padding_width);
 
-        // for even scaling compare target padding sizes and scale along
-        int max_padding_width = data->left.max + data->right.max;
-        int left  = free_width * ((float)data->left.max  / max_padding_width);
-        int right = free_width * ((float)data->right.max / max_padding_width);
+    int max_padding_height = data->top.max + data->bottom.max;
+    int top    = free_height * ((float)data->top.max    / max_padding_height);
+    int bottom = free_height * ((float)data->bottom.max / max_padding_height);
 
-        int max_padding_height = data->top.max + data->bottom.max;
-        int top    = free_height * ((float)data->top.max    / max_padding_height);
-        int bottom = free_height * ((float)data->bottom.max / max_padding_height);
+    // find offsets from center
+    float screen_to_right = (float)(left - right) / trs.pixel_width;
+    float screen_to_top   = (float)(bottom - top) / trs.pixel_width;
 
-        // find offsets from center
-        float screen_to_right = (float)(left - right) / trs.pixel_width;
-        float screen_to_top   = (float)(bottom - top) / trs.pixel_width;
+    // transform
+    trs.trans = ui_off(trs.trans, screen_to_right, screen_to_top);
+    trs = helper_scale_pack_to_dim(
+        trs, 
+        trs.pixel_width - left - right, 
+        trs.pixel_height - top - bottom
+    );
 
-        // build transform
-        helper_transform_pack child_trs = trs;
-        child_trs.trans = ui_off(child_trs.trans, screen_to_right, screen_to_top);
-        child_trs = helper_scale_pack_to_dim(
-            child_trs, 
-            trs.pixel_width - left - right, 
-            trs.pixel_height - top - bottom
-        );
-
-        // render child
-        render_dispatch(rc, child, cidx + i, child_trs);
-    }
+    // render child
+    render_dispatch(rc, child, cidx, trs);
 }
 
 // Layouts and renders children in a sequence
 // Divides leftower space among children proportional to their flex values
-static inline void render_row(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs) {
-    size_t              child_count = helper_get_child_count(node, rc->instance);
-    const ui_node*      children    = helper_get_children(node, rc->instance);
+static inline void render_row
+(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs) {
+    const ui_node_array children    = helper_get_node_children_array(node, rc->instance);
     const ui_row_data*  data        = helper_get_data(node, rc->instance);
     ui_measurement      row_measure = rc->measurements[idx];
 
     // find flexsum
-    float flexsum = helper_children_flexsum_width(rc->measurements, child_count, children, cidx);
+    float flexsum = helper_children_flexsum_width(rc->measurements, children.count, children.nodes, cidx);
     flexsum += data->spacing.flex;
 
     // rendering variables
@@ -924,7 +951,7 @@ static inline void render_row(helper_rendering_walk_context* rc, const ui_node* 
 
         // find spacing
         screen_spacing; {
-            size_t spaces_count = child_count == 0 ? 0 : child_count - 1;
+            size_t spaces_count = children.count == 0 ? 0 : children.count - 1;
 
             int total_spacing = left_width * data->spacing.flex / flexsum; // all spacers
             total_spacing = helper_min(total_spacing, 
@@ -943,8 +970,7 @@ static inline void render_row(helper_rendering_walk_context* rc, const ui_node* 
     }
 
     // render children
-    for (size_t i = 0; i < child_count; i++) {
-        const ui_node* child = &children[i];
+    for (size_t i = 0; i < children.count; i++) {
         const ui_measurement* child_measurement = &rc->measurements[cidx + i];
 
         // find child dimension in pixels
@@ -985,7 +1011,7 @@ static inline void render_row(helper_rendering_walk_context* rc, const ui_node* 
         child_trs = helper_scale_pack_to_dim(child_trs, child_width, child_height);
 
         // render child
-        render_dispatch(rc, child, cidx + i, child_trs);
+        render_dispatch(rc, &children.nodes[i], cidx + i, child_trs);
 
         // move cursor
         screen_cursor += screen_child_width;
@@ -995,14 +1021,14 @@ static inline void render_row(helper_rendering_walk_context* rc, const ui_node* 
 
 // Layouts and renders children in a sequence
 // Divides lower space among children proportional to their flex values
-static inline void render_column(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs) {
-    size_t                child_count = helper_get_child_count(node, rc->instance);
-    const ui_node*        children    = helper_get_children(node, rc->instance);
+static inline void render_column
+(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs) {
+    const ui_node_array   children    = helper_get_node_children_array(node, rc->instance);
     const ui_column_data* data        = helper_get_data(node, rc->instance);
     ui_measurement        col_measure = rc->measurements[idx];
 
     // find flexsum
-    float flexsum = helper_children_flexsum_height(rc->measurements, child_count, children, cidx);
+    float flexsum = helper_children_flexsum_height(rc->measurements, children.count, children.nodes, cidx);
     flexsum += data->spacing.flex;
 
     // rendering variables
@@ -1012,8 +1038,8 @@ static inline void render_column(helper_rendering_walk_context* rc, const ui_nod
     // content exceed parent, draw with minimal sizes
     if (col_measure.height.min > trs.pixel_height || flexsum == 0.0f) {
         // find cursor beginning
-        float cursor_interp_pixels = helper_lerp(0, (float)trs.pixel_height - col_measure.height.min, data->vertical_align);
-        screen_cursor  = 2.0f * (cursor_interp_pixels / trs.pixel_height) - 1.0f;
+        float cursor_interp_pixels = helper_lerp(0, (float)trs.pixel_width - col_measure.width.min, data->vertical_align);
+        screen_cursor  = (-1.0f) * (2.0f * (cursor_interp_pixels / trs.pixel_height) - 1.0f);
 
         // init other values
         screen_spacing = 2 * (float)data->spacing.min / trs.pixel_height;
@@ -1027,7 +1053,7 @@ static inline void render_column(helper_rendering_walk_context* rc, const ui_nod
 
         // find spacing
         screen_spacing; {
-            size_t spaces_count = child_count == 0 ? 0 : child_count - 1;
+            size_t spaces_count = children.count == 0 ? 0 : children.count - 1;
 
             int total_spacing = left_height * data->spacing.flex / flexsum; // all spacers
             total_spacing = helper_min(total_spacing, 
@@ -1046,8 +1072,7 @@ static inline void render_column(helper_rendering_walk_context* rc, const ui_nod
     }
 
     // render children
-    for (size_t i = 0; i < child_count; i++) {
-        const ui_node* child = &children[i];
+    for (size_t i = 0; i < children.count; i++) {
         const ui_measurement* child_measurement = &rc->measurements[cidx + i];
 
         // find child dimension in pixels
@@ -1088,7 +1113,7 @@ static inline void render_column(helper_rendering_walk_context* rc, const ui_nod
         child_trs = helper_scale_pack_to_dim(child_trs, child_width, child_height);
 
         // render child
-        render_dispatch(rc, child, cidx + i, child_trs);
+        render_dispatch(rc, &children.nodes[i], cidx + i, child_trs);
 
         // move cursor (downward)
         screen_cursor -= screen_child_height;
@@ -1097,16 +1122,23 @@ static inline void render_column(helper_rendering_walk_context* rc, const ui_nod
 }
 
 static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, helper_transform_pack trs) {
-    // preindex children
+    // allocate contiguous block of indices for own children
     size_t first_child_index = rc->last_used_index + 1;
-    rc->last_used_index     += helper_get_child_count(node, rc->instance);
+    if (helper_is_single_childed(node->type)) {
+        if (helper_get_node_single_child(node, rc->instance)) rc->last_used_index++;   
+    } 
+    else rc->last_used_index += helper_get_node_children_array(node, rc->instance).count;
 
-    switch (node->type & NODE_TYPE_MASK) {
+    // dispatch
+    switch (node->type & NODE_TYPE_NO_FLAG_MASK) {
     case ui_node_instance: {
+        // load a child while still in previous instance
+        const ui_node* child = helper_get_node_single_child(node, rc->instance);
+
         const void* old_instance = rc->instance;
         rc->instance = helper_get_data(node, rc->instance);
 
-        render_default(rc, node, idx, first_child_index, trs);
+        render_pass_to_single_child_given_child(rc, node, idx, first_child_index, trs, child);
 
         rc->instance = old_instance;
     } return;
@@ -1130,7 +1162,7 @@ static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* no
     } break;
     }
 
-    render_default(rc, node, idx, first_child_index, trs);
+    render_pass_to_single_child(rc, node, idx, first_child_index, trs);
 }
 
 void ui_render(ui_tree_info* ti) {
