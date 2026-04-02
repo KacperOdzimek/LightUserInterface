@@ -7,13 +7,13 @@
     typedef struct ui_injection_font    ui_injection_font;
 #endif
 
-#ifdef UI_IMPL
-    
+#ifdef UI_IMPL  
     typedef struct ui_transform ui_transform;
+    typedef struct ui_box_data  ui_box_data;
 
     static inline void ui_injection_render_box(
         ui_transform transform, int pixels_width, int pixels_height, 
-        const void* box_data, void* user_context
+        const ui_box_data* box_data, void* user_context
     );
 #endif
 
@@ -265,7 +265,7 @@ typedef struct ui_column_data {
 // box
 
 typedef struct ui_box_data {
-    ui_color color;
+    ui_color  color; // box color
 } ui_box_data;
 
 // image
