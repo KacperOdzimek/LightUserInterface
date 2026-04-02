@@ -90,38 +90,45 @@ typedef enum ui_node_type {
     // this pointer will be then carried into the subtree during
     // measure/render travelsals, affecting data reads from child nodes
     // according to their active flags
+    // single childed
     ui_node_instance,
 
     // Transform
 
     // transform node
     // transforms child nodes measure/render by an matrix
+    // single childed
     ui_node_transform,
 
     // Basic Layout
 
     // node padding
     // padds children by given length
+    // single childed
     ui_node_padding, 
 
     // node sizebox
     // during measure alters measurements according to own data
+    // single childed
     ui_node_sizebox,
 
     // Containers
 
     // node row
     // renders children in a horizontal sequence
+    // multiple children (array)
     ui_node_row,
 
     // node column
     // renders children in a vertical sequence
+    // multiple children (array)
     ui_node_column,
 
     // Primitives
 
     // node box
     // a box render primitive
+    // single childed
     ui_node_box,
 
     // Extra Flags
@@ -130,19 +137,25 @@ typedef enum ui_node_type {
     // if active, during measure and render travelsals
     // instead of reading node->data, parsing functions will read
     // (*(node_data_type*)(instance + node->data_instance_offset))
-    ui_node_data_instanced  = 1 << 6,
+    ui_node_flag_data_instanced  = 1 << 6,
 
     // see ui_node_instance
     // if active, during measure and render travelsals
     // instead of reading node->data, parsing functions will read
     // (*(const ui_node*/ui_node_array*)(instance + node->child_instance_offset))
-    ui_node_child_instanced = 1 << 7
+    ui_node_flag_child_instanced = 1 << 7
 } ui_node_type;
 
 typedef struct ui_node ui_node;
 typedef struct ui_node_array ui_node_array;
 
 // structure representing ui node - basic ui building block
+// type         - specify ui node type, which determines how node will be read
+// data         - type specific data struct, declared below in the header
+// child        - if node is single childed, this is this node child (may be 0x0 if no child)
+// child_array  - if node is multi childed, this is pointer to children array (may not be 0x0, but array may be of size 0)
+// if ui_node_flag_data_instanced or ui_node_flag_child_instanced are added to node type
+// data/child/child_array reads are altered as described in comments above those flags
 typedef struct ui_node {
     ui_node_type                type;
 
@@ -427,7 +440,7 @@ static inline ui_transform ui_mul(ui_transform p, ui_transform c) {
 // ===========================
 // Node helpers
 
-static const unsigned char NODE_TYPE_NO_FLAG_MASK = (unsigned char)(ui_node_data_instanced - 1);
+static const unsigned char NODE_TYPE_NO_FLAG_MASK = (unsigned char)(ui_node_flag_data_instanced - 1);
 
 static inline int helper_is_single_childed(ui_node_type type) {
     type &= NODE_TYPE_NO_FLAG_MASK;
@@ -440,17 +453,17 @@ static inline int helper_is_single_childed(ui_node_type type) {
 }
 
 static inline const void* helper_get_data(const ui_node* node, const char* instance) {
-    if (node->type & ui_node_data_instanced) return (void*)(instance + node->data_instance_offset);
+    if (node->type & ui_node_flag_data_instanced) return (void*)(instance + node->data_instance_offset);
     return node->data;
 }
 
 static inline const ui_node* helper_get_node_single_child(const ui_node* node, const char* instance) {
-    if (!(node->type & ui_node_child_instanced)) return node->child;
+    if (!(node->type & ui_node_flag_child_instanced)) return node->child;
     return *(const ui_node**)(instance + node->child_instance_offset);
 }
 
 static inline const ui_node_array helper_get_node_children_array(const ui_node* node, const char* instance) {
-    if (!(node->type & ui_node_child_instanced)) return *node->child_array;
+    if (!(node->type & ui_node_flag_child_instanced)) return *node->child_array;
     return **(const ui_node_array**)(instance + node->child_instance_offset);
 }
 
