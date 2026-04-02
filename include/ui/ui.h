@@ -2,15 +2,17 @@
     Injections
 */
 
-#ifndef UI_H
-    typedef struct ui_injection_texture ui_injection_texture;
-    typedef struct ui_injection_font    ui_injection_font;
-#endif
-
 #ifdef UI_IMPL  
+    typedef struct ui_length     ui_length;
     typedef struct ui_transform  ui_transform;
     typedef struct ui_box_data   ui_box_data;
     typedef struct ui_image_data ui_image_data;
+
+    static inline void ui_injection_measure_image(
+        const ui_image_data* image, 
+        ui_length* width, ui_length* height,
+        void* user_context
+    );
 
     static inline void ui_injection_render_box(
         ui_transform transform, int pixels_width, int pixels_height, 
@@ -281,8 +283,8 @@ typedef struct ui_box_data {
 // image
 
 typedef struct ui_image_data {
-    const ui_injection_texture* image;   // the image pointer
-    ui_color                    tint;    // image color modyficator
+    const char* image;   // image name/path
+    ui_color    tint;    // image color modyficator
 } ui_image_data;
 
 // text
@@ -592,6 +594,7 @@ typedef struct helper_measurement_walk_context {
                                                 // used to keep track measurements array fill
     helper_measurement* measurements;           // measurements write target
     size_t              measurements_capacity;  // measurements capacity limit
+    void*               user_context;           // user context to be passed to injected functions
 } helper_measurement_walk_context;
 
 // Function dispatching measuring based on node type
@@ -855,6 +858,25 @@ static inline void measure_column(helper_measurement_walk_context* mc, const ui_
     mc->measurements[idx] = own;
 }
 
+static inline void measure_image(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
+    measure_copy_child_or_fill(mc, node, idx, cidx);
+    helper_measurement* own = &mc->measurements[idx];
+
+    const ui_image_data* data = helper_get_data(node, mc->instance);
+    ui_length width, height; ui_injection_measure_image(data, &width, &height, mc->user_context);
+
+    // lower limits
+    own->width.min  = helper_max(own->width.min, width.min);
+    own->height.min = helper_max(own->height.min, height.min);
+
+    // upper limits
+    own->width.max  = helper_max(own->width.min, width.max);
+    own->height.max = helper_max(own->height.min, height.max);
+
+    // do not flex
+    own->width.flex = 0.0f; own->height.flex = 0.0f;
+}
+
 static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node* node, size_t idx) {
     // allocate contiguous block of indices for own children
     size_t first_child_index = mc->last_used_index + 1;
@@ -881,10 +903,11 @@ static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node*
     } return;
 
     case ui_node_transform: measure_transform(mc, node, idx, first_child_index); return;
-    case ui_node_padding:   measure_padding(mc, node, idx, first_child_index); return;
-    case ui_node_sizebox:   measure_sizebox(mc, node, idx, first_child_index); return;
-    case ui_node_row:       measure_row    (mc, node, idx, first_child_index); return;
-    case ui_node_column:    measure_column (mc, node, idx, first_child_index); return;
+    case ui_node_padding:   measure_padding  (mc, node, idx, first_child_index);   return;
+    case ui_node_sizebox:   measure_sizebox  (mc, node, idx, first_child_index);   return;
+    case ui_node_row:       measure_row      (mc, node, idx, first_child_index);   return;
+    case ui_node_column:    measure_column   (mc, node, idx, first_child_index);   return;
+    case ui_node_image:     measure_image    (mc, node, idx, first_child_index);   return;
     }
 
     // default dispatch case
@@ -899,6 +922,7 @@ ui_return_flag ui_measure(ui_args* a) {
         .last_used_index        = 0,
         .measurements           = (helper_measurement*)(a->temp_memory + sizeof(size_t)),
         .measurements_capacity  = (a->temp_capacity / sizeof(helper_measurement)),
+        .user_context           = a->user_context
     };
 
     if (setjmp(mc.ui_measure_call_frame) == 0) measure_dispatch(&mc, a->root, 0);
@@ -1367,6 +1391,11 @@ static inline void render_column
     helper_temp_mem_arena_free(rc, (char*)slots);
 }
 
+static inline void render_image_and_fill_image
+(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, helper_transform_pack trs) {
+
+}
+
 static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, helper_transform_pack trs) {
     // allocate contiguous block of indices for own children
     size_t first_child_index = rc->last_used_index + 1;
@@ -1404,9 +1433,17 @@ static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* no
 
     // for primitves call injected methods
     case ui_node_box: {
-        ui_injection_render_box(
-            trs.trans, trs.pixel_width, trs.pixel_height, helper_get_data(node, rc->instance), rc->user_context
-        );
+        ui_injection_render_box(trs.trans, trs.pixel_width, trs.pixel_height, helper_get_data(node, rc->instance), rc->user_context);
+    } break;
+    case ui_node_image: {
+        helper_measurement own = rc->measurements[idx];
+        int width  = helper_bound_length_in_parent(own.width,  trs.pixel_width);
+        int height = helper_bound_length_in_parent(own.height, trs.pixel_height);
+        trs = helper_scale_pack_to_dim(trs, width, height);
+        ui_injection_render_image(trs.trans, trs.pixel_width, trs.pixel_height, helper_get_data(node, rc->instance), rc->user_context);
+    } break;
+    case ui_node_fill_image: {
+        ui_injection_render_image(trs.trans, trs.pixel_width, trs.pixel_height, helper_get_data(node, rc->instance), rc->user_context);
     } break;
     }
 
