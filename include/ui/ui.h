@@ -913,11 +913,11 @@ static inline void helper_temp_mem_arena_free(helper_rendering_walk_context* rc,
 static void render_dispatch
 (helper_rendering_walk_context* rc, const ui_node* node, size_t idx, helper_transform_pack trs);
 
-// Read render_pass_to_single_child
-// This part is exposed for ui_node_instance
-static inline void render_pass_to_single_child_given_child
-(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs, const ui_node* child) {
-    if (!child) return;
+// Render option for sizebox
+// Renders the child, while altering it's transform according to measurements
+static inline void render_sizebox
+(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs) {
+    const ui_node* child = helper_get_node_single_child(node, rc->instance);
 
     helper_measurement own_measure   = rc->measurements[idx];
     helper_measurement child_measure = rc->measurements[cidx];
@@ -936,16 +936,8 @@ static inline void render_pass_to_single_child_given_child
     render_dispatch(rc, child, cidx, helper_scale_pack_to_dim(trs, given_width, given_height));
 }
 
-// Works for single childed nodes
-// Passes rendering process to child
-// With regard for own and child measurements
-static inline void render_pass_to_single_child
-(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, size_t cidx, helper_transform_pack trs) {
-    const ui_node* child = helper_get_node_single_child(node, rc->instance);
-    render_pass_to_single_child_given_child(rc, node, idx, cidx, trs, child);
-}
-
-// Render child padded
+// Render option for padding
+// Renders child padded
 // The padding may scale between [min, max]
 // But keep proportion in axis (between left and right, and top and bottom)
 static inline void render_padding
@@ -993,6 +985,7 @@ static inline void render_padding
     render_dispatch(rc, child, cidx, trs);
 }
 
+// Render option for row
 // Layouts and renders children in a sequence
 // Divides leftower space among children proportional to their flex values
 static inline void render_row
@@ -1137,6 +1130,7 @@ static inline void render_row
     helper_temp_mem_arena_free(rc, (char*)slots);
 }
 
+// Render option for column
 // Layouts and renders children in a sequence
 // Divides lower space among children proportional to their flex values
 static inline void render_column
@@ -1298,7 +1292,8 @@ static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* no
         const void* old_instance = rc->instance;
         rc->instance = helper_get_data(node, rc->instance);
 
-        render_pass_to_single_child_given_child(rc, node, idx, first_child_index, trs, child);
+        // recurse into subtree
+        if (child) render_dispatch(rc, child, first_child_index, trs);
 
         rc->instance = old_instance;
     } return;
@@ -1311,8 +1306,9 @@ static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* no
     } break;
 
     case ui_node_padding: render_padding(rc, node, idx, first_child_index, trs); return;
-    case ui_node_row:     render_row    (rc, node, idx, first_child_index, trs);     return;
-    case ui_node_column:  render_column (rc, node, idx, first_child_index, trs);  return;
+    case ui_node_sizebox: render_sizebox(rc, node, idx, first_child_index, trs); return;
+    case ui_node_row:     render_row    (rc, node, idx, first_child_index, trs); return;
+    case ui_node_column:  render_column (rc, node, idx, first_child_index, trs); return;
 
     // for primitves call injected methods
     case ui_node_box: {
@@ -1322,7 +1318,11 @@ static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* no
     } break;
     }
 
-    render_pass_to_single_child(rc, node, idx, first_child_index, trs);
+    // by default recurse into subtree, without altering transform
+    // works only for single childed nodes - multi childed nodes must be specified
+    // this is, because not all nodes alters transform anyhow
+    const ui_node* child = helper_get_node_single_child(node, rc->instance);
+    if (child) render_dispatch(rc, child, first_child_index, trs);
 }
 
 ui_return_flag ui_render(ui_args* a) {
