@@ -388,6 +388,10 @@ static inline ui_color ui_hex(const char* hex) {
     return result;
 }
 
+// compile time ui_color from hex builder
+// allows both lower and upper case letters
+// may include alpha (8 hex digits) or not (6 hex digits)
+// '#' prefix required
 #define UI_HEX(s) (ui_color){ \
     UI_HEX_BYTE(s[1], s[2]), \
     UI_HEX_BYTE(s[3], s[4]), \
