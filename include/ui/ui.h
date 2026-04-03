@@ -7,10 +7,17 @@
     typedef struct ui_transform  ui_transform;
     typedef struct ui_box_data   ui_box_data;
     typedef struct ui_image_data ui_image_data;
+    typedef struct ui_text_data  ui_text_data;
 
     static inline void ui_injection_measure_tight_image(
         const ui_image_data* image, 
-        ui_length* width, ui_length* height,
+        ui_length* width_target, ui_length* height_target,
+        void* user_context
+    );
+
+    static inline void ui_injection_measure_text(
+        const ui_text_data* text,
+        ui_length* width_target, ui_length* height_target,
         void* user_context
     );
 
@@ -22,6 +29,11 @@
     static inline void ui_injection_render_image(
         ui_transform transform, int pixels_width, int pixels_height, 
         const ui_image_data* data, void* user_context
+    );
+
+    static inline void ui_injection_render_text(
+        ui_transform transform, int pixels_width, int pixels_height, 
+        const ui_text_data* data, void* user_context
     );
 #endif
 
@@ -162,18 +174,25 @@ typedef enum ui_node_type {
     ui_node_box,
 
     // node image
-    // other image render primitive
+    // image render primitive
     // renders given texture all over given span
     // data - ui_image_data
     // single childed
     ui_node_image,
 
     // node tight image
-    // image render primitive
+    // other image render primitive
     // renders given texture in it's desired size
     // data - ui_image_data
     // single childed
     ui_node_tight_image,
+
+    // node text
+    // text render primitive
+    // renders text in it's desired size
+    // data - ui_text_data
+    // single childed
+    ui_node_text,
 
     // Extra Flags
 
@@ -290,7 +309,10 @@ typedef struct ui_image_data {
 // text
  
 typedef struct ui_text_data {
-
+    unsigned int size;  // font size
+    const char*  font;  // font name/path
+    const char*  text;  // text pointer
+    ui_color     tint;  // text color modyficator
 } ui_text_data;
 
 // ===========================
@@ -858,12 +880,41 @@ static inline void measure_column(helper_measurement_walk_context* mc, const ui_
     mc->measurements[idx] = own;
 }
 
-static inline void measure_image(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
+// Measure option for ui_node_tight_image
+// First measures subtree, then measures the image
+// In both axes:
+// min = max(subtree.min, image.min)
+// max = max(subtree.min, image.max)
+static inline void measure_tight_image(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
     measure_copy_child_or_fill(mc, node, idx, cidx);
     helper_measurement* own = &mc->measurements[idx];
 
     const ui_image_data* data = helper_get_data(node, mc->instance);
     ui_length width, height; ui_injection_measure_tight_image(data, &width, &height, mc->user_context);
+
+    // lower limits
+    own->width.min  = helper_max(own->width.min, width.min);
+    own->height.min = helper_max(own->height.min, height.min);
+
+    // upper limits
+    own->width.max  = helper_max(own->width.min, width.max);
+    own->height.max = helper_max(own->height.min, height.max);
+
+    // do not flex
+    own->width.flex = 0.0f; own->height.flex = 0.0f;
+}
+
+// Measure option for ui_node_text
+// First measures subtree, then measures the text
+// In both axes:
+// min = max(subtree.min, text.min)
+// max = max(subtree.min, text.max)
+static inline void measure_text(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
+    measure_copy_child_or_fill(mc, node, idx, cidx);
+    helper_measurement* own = &mc->measurements[idx];
+
+    const ui_text_data* data = helper_get_data(node, mc->instance);
+    ui_length width, height; ui_injection_measure_text(data, &width, &height, mc->user_context);
 
     // lower limits
     own->width.min  = helper_max(own->width.min, width.min);
@@ -902,12 +953,13 @@ static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node*
         mc->instance = old_instance;
     } return;
 
-    case ui_node_transform: measure_transform(mc, node, idx, first_child_index); return;
-    case ui_node_padding:   measure_padding  (mc, node, idx, first_child_index);   return;
-    case ui_node_sizebox:   measure_sizebox  (mc, node, idx, first_child_index);   return;
-    case ui_node_row:       measure_row      (mc, node, idx, first_child_index);   return;
-    case ui_node_column:    measure_column   (mc, node, idx, first_child_index);   return;
-    case ui_node_tight_image:     measure_image    (mc, node, idx, first_child_index);   return;
+    case ui_node_transform:     measure_transform   (mc, node, idx, first_child_index);    return;
+    case ui_node_padding:       measure_padding     (mc, node, idx, first_child_index);    return;
+    case ui_node_sizebox:       measure_sizebox     (mc, node, idx, first_child_index);    return;
+    case ui_node_row:           measure_row         (mc, node, idx, first_child_index);    return;
+    case ui_node_column:        measure_column      (mc, node, idx, first_child_index);    return;
+    case ui_node_tight_image:   measure_tight_image (mc, node, idx, first_child_index);    return;
+    case ui_node_text:          measure_text        (mc, node, idx, first_child_index);    return;
     }
 
     // default dispatch case
@@ -1440,6 +1492,13 @@ static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* no
     case ui_node_image: {
         ui_injection_render_image(trs.trans, trs.pixel_width, trs.pixel_height, helper_get_data(node, rc->instance), rc->user_context);
     } break;
+    case ui_node_text: {
+        helper_measurement own = rc->measurements[idx];
+        int width  = helper_bound_length_in_parent(own.width,  trs.pixel_width);
+        int height = helper_bound_length_in_parent(own.height, trs.pixel_height);
+        trs = helper_scale_pack_to_dim(trs, width, height);
+        ui_injection_render_text(trs.trans, trs.pixel_width, trs.pixel_height, helper_get_data(node, rc->instance), rc->user_context);
+    }
     }
 
     // by default recurse into subtree, without altering transform
