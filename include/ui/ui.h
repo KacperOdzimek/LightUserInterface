@@ -9,6 +9,8 @@
     typedef struct ui_image_data ui_image_data;
     typedef struct ui_text_data  ui_text_data;
 
+    // Measurements
+
     static inline void ui_injection_measure_sized_image(
         const ui_image_data*    data,
         ui_length*              width_target, 
@@ -22,6 +24,8 @@
         ui_length*              height_target,
         void*                   user_context
     );
+
+    // Render Primitives
 
     static inline void ui_injection_render_box(
         ui_transform            transform, 
@@ -44,6 +48,15 @@
         int                     pixels_width, 
         int                     pixels_height, 
         const ui_text_data*     data,
+        void*                   user_context
+    );
+
+    // Render Modificators
+
+    static inline void ui_injection_render_set_clipbox(
+        ui_transform            transform,
+        int                     pixels_width,
+        int                     pixels_height,
         void*                   user_context
     );
 #endif
