@@ -8,7 +8,7 @@
     typedef struct ui_box_data   ui_box_data;
     typedef struct ui_image_data ui_image_data;
 
-    static inline void ui_injection_measure_image(
+    static inline void ui_injection_measure_tight_image(
         const ui_image_data* image, 
         ui_length* width, ui_length* height,
         void* user_context
@@ -101,7 +101,7 @@ typedef struct ui_color {
 
 // runtime hex to ui_color conversion
 // letters case does not matter, '#' prefix is required
-// if hex[6] is not '\0', then alpha channel is read, else it is set to FF
+// if hex[7] is not '\0', then alpha channel is read, else it is set to FF
 // UI_HEX <- compile time alternative
 static inline ui_color ui_hex(const char* hex);
 
@@ -162,18 +162,18 @@ typedef enum ui_node_type {
     ui_node_box,
 
     // node image
-    // image render primitive
-    // renders given texture in it's desired size
-    // data - ui_image_data
-    // single childed
-    ui_node_image,
-
-    // node fill image
     // other image render primitive
     // renders given texture all over given span
     // data - ui_image_data
     // single childed
-    ui_node_fill_image,
+    ui_node_image,
+
+    // node tight image
+    // image render primitive
+    // renders given texture in it's desired size
+    // data - ui_image_data
+    // single childed
+    ui_node_tight_image,
 
     // Extra Flags
 
@@ -863,7 +863,7 @@ static inline void measure_image(helper_measurement_walk_context* mc, const ui_n
     helper_measurement* own = &mc->measurements[idx];
 
     const ui_image_data* data = helper_get_data(node, mc->instance);
-    ui_length width, height; ui_injection_measure_image(data, &width, &height, mc->user_context);
+    ui_length width, height; ui_injection_measure_tight_image(data, &width, &height, mc->user_context);
 
     // lower limits
     own->width.min  = helper_max(own->width.min, width.min);
@@ -907,7 +907,7 @@ static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node*
     case ui_node_sizebox:   measure_sizebox  (mc, node, idx, first_child_index);   return;
     case ui_node_row:       measure_row      (mc, node, idx, first_child_index);   return;
     case ui_node_column:    measure_column   (mc, node, idx, first_child_index);   return;
-    case ui_node_image:     measure_image    (mc, node, idx, first_child_index);   return;
+    case ui_node_tight_image:     measure_image    (mc, node, idx, first_child_index);   return;
     }
 
     // default dispatch case
@@ -1391,11 +1391,6 @@ static inline void render_column
     helper_temp_mem_arena_free(rc, (char*)slots);
 }
 
-static inline void render_image_and_fill_image
-(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, helper_transform_pack trs) {
-
-}
-
 static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, helper_transform_pack trs) {
     // allocate contiguous block of indices for own children
     size_t first_child_index = rc->last_used_index + 1;
@@ -1435,14 +1430,14 @@ static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* no
     case ui_node_box: {
         ui_injection_render_box(trs.trans, trs.pixel_width, trs.pixel_height, helper_get_data(node, rc->instance), rc->user_context);
     } break;
-    case ui_node_image: {
+    case ui_node_tight_image: {
         helper_measurement own = rc->measurements[idx];
         int width  = helper_bound_length_in_parent(own.width,  trs.pixel_width);
         int height = helper_bound_length_in_parent(own.height, trs.pixel_height);
         trs = helper_scale_pack_to_dim(trs, width, height);
         ui_injection_render_image(trs.trans, trs.pixel_width, trs.pixel_height, helper_get_data(node, rc->instance), rc->user_context);
     } break;
-    case ui_node_fill_image: {
+    case ui_node_image: {
         ui_injection_render_image(trs.trans, trs.pixel_width, trs.pixel_height, helper_get_data(node, rc->instance), rc->user_context);
     } break;
     }
