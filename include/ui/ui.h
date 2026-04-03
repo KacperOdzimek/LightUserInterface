@@ -194,29 +194,16 @@ typedef enum ui_node_type {
 
     // node box
     // a box render primitive
-    // on render takes entire given space
+    // it is spanned by it's children, unless with ui_node_flag_fill flag
     // single childed
     ui_node_box,
 
-    // node box
-    // other box render primitive
-    // on render it's dimensions are dicatated by it's subtree measurement
-    // single childed
-    ui_node_tight_box,
-
     // node image
     // image render primitive
-    // renders given texture all over given span
+    // it is spanned by it's children, unless with ui_node_flag_fill flag
     // data - ui_image_data
     // single childed
     ui_node_image,
-
-    // node image
-    // image render primitive
-    // on render it's dimensions are dicatated by it's subtree measurement
-    // data - ui_image_data
-    // single childed
-    ui_node_tight_image,
 
     // node sized image
     // other image render primitive
@@ -234,6 +221,11 @@ typedef enum ui_node_type {
     ui_node_text,
 
     // Extra Flags
+
+    // most nodes dimensions are dictated by their subtrees
+    // this flag cause the nodes to fill entire given space instead
+    // it is the same as overwriting length maxes of target node with sizebox
+    ui_node_flag_fill = 1 << 5,
 
     // see ui_node_instance
     // if active, during measure and render travelsals
@@ -599,7 +591,7 @@ static inline ui_transform ui_mul(ui_transform p, ui_transform c) {
 // ===========================
 // Node helpers
 
-static const unsigned char NODE_TYPE_NO_FLAG_MASK = (unsigned char)(ui_node_flag_data_instanced - 1);
+static const unsigned char NODE_TYPE_NO_FLAG_MASK = (unsigned char)(ui_node_flag_fill - 1);
 
 static inline int helper_is_single_childed(ui_node_type type) {
     type &= NODE_TYPE_NO_FLAG_MASK;
@@ -671,9 +663,9 @@ typedef struct helper_measurement_walk_context {
 // - cidx - first child index
 static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node* node, size_t idx);
 
-// See measure_copy_child_or_fill
+// See measure_copy_child
 // Exposed for ui_node_instance dispatch
-static inline void measure_copy_child_or_fill_given_child
+static inline void measure_copy_child_given_child
 (helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx, const ui_node* child) {
     helper_measurement* own = &mc->measurements[idx];
 
@@ -684,25 +676,25 @@ static inline void measure_copy_child_or_fill_given_child
     }
 
     *own = (helper_measurement){
-        .width  = {0, ui_inf_length, 1.0f},
-        .height = {0, ui_inf_length, 1.0f}
+        .width  = {0, 0, 0.0f},
+        .height = {0, 0, 0.0f}
     };
 }
 
 // Basic measure option for single childed nodes
 // If node have child, the parent node measurement is set to child's measurement
 // Else node's measurement is set to (ui_length){0, inf, 1.0f} in both axes
-static inline void measure_copy_child_or_fill(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
+static inline void measure_copy_child(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
     const ui_node* child = helper_get_node_single_child(node, mc->instance);
-    measure_copy_child_or_fill_given_child(mc, node, idx, cidx, child);
+    measure_copy_child_given_child(mc, node, idx, cidx, child);
 }
 
 // Measure option for ui_node_measure_transform in three steps:
-// - Measure child 'measure_copy_child_or_fill'
+// - Measure child 'measure_copy_child'
 // - Apply transform
 // - Find bounding box, and save it as own measurement
 static inline void measure_transform(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
-    measure_copy_child_or_fill(mc, node, idx, cidx);
+    measure_copy_child(mc, node, idx, cidx);
 
     const ui_transform_data* data = helper_get_data(node, mc->instance);
     helper_measurement* own = &mc->measurements[idx];
@@ -780,10 +772,10 @@ static inline void measure_transform(helper_measurement_walk_context* mc, const 
 }
 
 // Measure option for ui_node_padding in two steps:
-// - Measure children with 'measure_copy_child_or_fill'
+// - Measure children with 'measure_copy_child'
 // - Extend each axis by padding
 static inline void measure_padding(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
-    measure_copy_child_or_fill(mc, node, idx, cidx);
+    measure_copy_child(mc, node, idx, cidx);
 
     const ui_padding_data* data = helper_get_data(node, mc->instance);
     helper_measurement* own = &mc->measurements[idx];
@@ -799,10 +791,10 @@ static inline void measure_padding(helper_measurement_walk_context* mc, const ui
 }
 
 // Measure option for ui_node_sizebox in two steps:
-// - Measure children with 'measure_copy_child_or_fill'
+// - Measure children with 'measure_copy_child'
 // - Overwrite specified by data->flag fields with values from data
 static inline void measure_sizebox(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
-    measure_copy_child_or_fill(mc, node, idx, cidx);
+    measure_copy_child(mc, node, idx, cidx);
 
     const ui_sizebox_data* data = helper_get_data(node, mc->instance);
     helper_measurement*    own  = &mc->measurements[idx];
@@ -929,7 +921,7 @@ static inline void measure_column(helper_measurement_walk_context* mc, const ui_
 // min = max(subtree.min, image.min)
 // max = max(subtree.min, image.max)
 static inline void measure_sized_image(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
-    measure_copy_child_or_fill(mc, node, idx, cidx);
+    measure_copy_child(mc, node, idx, cidx);
     helper_measurement* own = &mc->measurements[idx];
 
     const ui_image_data* data = helper_get_data(node, mc->instance);
@@ -953,7 +945,7 @@ static inline void measure_sized_image(helper_measurement_walk_context* mc, cons
 // min = max(subtree.min, text.min)
 // max = max(subtree.min, text.max)
 static inline void measure_text(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
-    measure_copy_child_or_fill(mc, node, idx, cidx);
+    measure_copy_child(mc, node, idx, cidx);
     helper_measurement* own = &mc->measurements[idx];
 
     const ui_text_data* data = helper_get_data(node, mc->instance);
@@ -992,21 +984,31 @@ static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node*
 
         const void* old_instance = mc->instance;
         mc->instance = helper_get_data(node, mc->instance);
-        measure_copy_child_or_fill_given_child(mc, node, idx, first_child_index, child);
+        measure_copy_child_given_child(mc, node, idx, first_child_index, child);
         mc->instance = old_instance;
-    } return;
+    } break;
 
-    case ui_node_transform:     measure_transform   (mc, node, idx, first_child_index);    return;
-    case ui_node_padding:       measure_padding     (mc, node, idx, first_child_index);    return;
-    case ui_node_sizebox:       measure_sizebox     (mc, node, idx, first_child_index);    return;
-    case ui_node_row:           measure_row         (mc, node, idx, first_child_index);    return;
-    case ui_node_column:        measure_column      (mc, node, idx, first_child_index);    return;
-    case ui_node_sized_image:   measure_sized_image (mc, node, idx, first_child_index);    return;
-    case ui_node_text:          measure_text        (mc, node, idx, first_child_index);    return;
-    }
+    case ui_node_transform:     measure_transform   (mc, node, idx, first_child_index); break;
+    case ui_node_padding:       measure_padding     (mc, node, idx, first_child_index); break;
+    case ui_node_sizebox:       measure_sizebox     (mc, node, idx, first_child_index); break;
+    case ui_node_row:           measure_row         (mc, node, idx, first_child_index); break;
+    case ui_node_column:        measure_column      (mc, node, idx, first_child_index); break;
+    case ui_node_sized_image:   measure_sized_image (mc, node, idx, first_child_index); break;
+    case ui_node_text:          measure_text        (mc, node, idx, first_child_index); break;
 
     // default dispatch case
-    measure_copy_child_or_fill(mc, node, idx, first_child_index);
+    default: measure_copy_child(mc, node, idx, first_child_index); break;
+    }
+
+    // if fill flag, overwrite maxes
+    if (node->type & ui_node_flag_fill) {
+        helper_measurement* own = &mc->measurements[idx];
+        own->width.max  = ui_inf_length;
+        own->width.flex = 1.0f;
+
+        own->height.max = ui_inf_length;
+        own->height.flex = 1.0f;
+    }
 }
 
 ui_return_flag ui_measure(ui_args* a) {
@@ -1531,21 +1533,11 @@ static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* no
 
     // for primitves call injected methods
     case ui_node_box: {
-        // dont wrap
-        ui_injection_render_box(trs.trans, trs.pixel_width, trs.pixel_height, helper_get_data(node, rc->instance), rc->user_context);
-    } break;
-
-    case ui_node_tight_box: {
         trs = helper_limit_given_space_to_own_measurement(trs, rc->measurements[idx]); // wrap to contents
         ui_injection_render_box(trs.trans, trs.pixel_width, trs.pixel_height, helper_get_data(node, rc->instance), rc->user_context);
     } break;
 
     case ui_node_image: {
-        // dont wrap
-        ui_injection_render_image(trs.trans, trs.pixel_width, trs.pixel_height, helper_get_data(node, rc->instance), rc->user_context);
-    } break;
-
-    case ui_node_tight_image: {
         trs = helper_limit_given_space_to_own_measurement(trs, rc->measurements[idx]); // wrap to contents
         ui_injection_render_image(trs.trans, trs.pixel_width, trs.pixel_height, helper_get_data(node, rc->instance), rc->user_context);
     } break;
@@ -1556,7 +1548,7 @@ static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* no
     } break;
     
     case ui_node_text: {
-        trs = helper_limit_given_space_to_own_measurement(trs, rc->measurements[idx]);
+        trs = helper_limit_given_space_to_own_measurement(trs, rc->measurements[idx]); // wrap to contents
         ui_injection_render_text(trs.trans, trs.pixel_width, trs.pixel_height, helper_get_data(node, rc->instance), rc->user_context);
     }
     }
