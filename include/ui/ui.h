@@ -22,46 +22,6 @@
         ui_length*              height_target,
         void*                   user_context
     );
-
-    // Render Primitives
-    // To be deleted
-
-    typedef struct ui_transform ui_transform;
-    typedef struct ui_box_data ui_box_data;
-    typedef struct ui_image_data ui_image_data;
-    typedef struct ui_text_data ui_text_data;
-
-    static inline void ui_injection_render_box(
-        ui_transform            transform, 
-        int                     pixels_width, 
-        int                     pixels_height, 
-        const ui_box_data*      data,
-        void*                   user_context
-    );
-
-    static inline void ui_injection_render_image(
-        ui_transform            transform, 
-        int                     pixels_width, 
-        int                     pixels_height, 
-        const ui_image_data*    data,
-        void*                   user_context
-    );
-
-    static inline void ui_injection_render_text(
-        ui_transform            transform, 
-        int                     pixels_width, 
-        int                     pixels_height, 
-        const ui_text_data*     data,
-        void*                   user_context
-    );
-
-    // Render Modificators
-    // To be deleted
-
-    static inline void ui_injection_render_set_clipbox(
-        ui_transform            transform,
-        void*                   user_context
-    );
 #endif
 
 /*
