@@ -1,13 +1,26 @@
 /*
-    Implementation Injections
+    Injections
 */
 
-#ifdef UI_IMPL
-    typedef struct ui_transform ui_transform;
+#ifdef UI_IMPL  
+    typedef struct ui_length     ui_length;
+    typedef struct ui_image_data ui_image_data;
+    typedef struct ui_text_data  ui_text_data;
 
-    static inline void ui_injection_render_box(
-        ui_transform transform, int pixels_width, int pixels_height, 
-        const void* box_data, void* user_context
+    // Measurements
+
+    static inline void ui_injection_measure_sized_image(
+        const ui_image_data*    data,
+        ui_length*              width_target, 
+        ui_length*              height_target,
+        void*                   user_context
+    );
+
+    static inline void ui_injection_measure_text(
+        const ui_text_data*     data,
+        ui_length*              width_target, 
+        ui_length*              height_target,
+        void*                   user_context
     );
 #endif
 
@@ -78,6 +91,22 @@ static inline ui_transform ui_rot(ui_transform m, float deg_cw);
 // UI_TRANS <- compile time ui_trans transform builder macro (definied later in the file)
 
 // ===========================
+// Colors
+
+// basic 32 bit color
+typedef struct ui_color {
+    unsigned char r, g, b, a;
+} ui_color;
+
+// runtime hex to ui_color conversion
+// letters case does not matter, '#' prefix is required
+// if hex[7] is not '\0', then alpha channel is read, else it is set to FF
+// UI_HEX <- compile time alternative
+static inline ui_color ui_hex(const char* hex);
+
+// UI_HEX <- compile time ui_hex alternative (definied later in the file)
+
+// ===========================
 // Node Typedef
 
 // common
@@ -85,7 +114,7 @@ static inline ui_transform ui_rot(ui_transform m, float deg_cw);
 typedef enum ui_node_type {
     // Architectural
 
-    // instance node
+    // node instance
     // sets instance pointer to value of own data
     // this pointer will be then carried into the subtree during
     // measure/render travelsals, affecting data reads from child nodes
@@ -95,10 +124,19 @@ typedef enum ui_node_type {
 
     // Transform
 
-    // transform node
+    // node transform
     // transforms child nodes measure/render by an matrix
     // single childed
     ui_node_transform,
+
+    // Rendering
+
+    // node clipbox
+    // constrains rendering to own dimensions
+    // pair with inner sizebox for full control
+    // no data
+    // single childed
+    ui_node_clipbox,
 
     // Basic Layout
 
@@ -128,10 +166,38 @@ typedef enum ui_node_type {
 
     // node box
     // a box render primitive
+    // it is spanned by it's children, unless with ui_node_flag_fill flag
     // single childed
     ui_node_box,
 
+    // node image
+    // image render primitive
+    // it is spanned by it's children, unless with ui_node_flag_fill flag
+    // data - ui_image_data
+    // single childed
+    ui_node_image,
+
+    // node sized image
+    // other image render primitive
+    // renders given texture in it's desired size 
+    // (unless stretched by contents minimal size)
+    // data - ui_image_data
+    // single childed
+    ui_node_sized_image,
+
+    // node text
+    // text render primitive
+    // renders text in it's desired size
+    // data - ui_text_data
+    // single childed
+    ui_node_text,
+
     // Extra Flags
+
+    // most nodes dimensions are dictated by their subtrees
+    // this flag cause the nodes to fill entire given space instead
+    // it is the same as overwriting length maxes of target node with sizebox
+    ui_node_flag_fill = 1 << 5,
 
     // see ui_node_instance
     // if active, during measure and render travelsals
@@ -230,46 +296,140 @@ typedef struct ui_column_data {
     ui_length spacing;          // spacing between childrens
 } ui_column_data;
 
+// box
+
+typedef struct ui_box_data {
+    ui_color  color; // box color
+} ui_box_data;
+
+// image
+
+typedef struct ui_image_data {
+    const char* image;   // image name/path
+    ui_color    tint;    // image color modyficator
+} ui_image_data;
+
+// text
+ 
+typedef struct ui_text_data {
+    unsigned int size;  // font size
+    const char*  font;  // font name/path
+    const char*  text;  // text pointer
+    ui_color     tint;  // text color modyficator
+} ui_text_data;
+
 // ===========================
 // Api
+
+typedef enum ui_draw_command_type {
+    ui_draw_box,
+    ui_draw_image,
+    ui_draw_text,
+} ui_draw_command_type;
+
+typedef struct ui_draw_command {
+    ui_draw_command_type type;
+
+    ui_transform        transform;
+    int                 pixels_width;
+    int                 pixels_height;
+    int                 clipbox_index;
+    int                 depth;
+
+    union {
+        ui_box_data     box_data;
+        ui_image_data   image_data;
+        ui_text_data    text_data;
+    };
+} ui_draw_command;
+
+typedef struct ui_arena {
+    char*  memory;
+    size_t capacity;
+    size_t position;
+} ui_arena;
 
 // ui functions return flag
 // flags are self explanatory
 typedef enum ui_return_flag {
-    ui_return_ok,
-    ui_retrun_temp_to_small
+    ui_return_ok = 0,
+
+    // when temporary memory would overflow
+    ui_return_temp_arena_too_small,
+
+    // when command memory would overflow
+    ui_return_command_arena_too_small,
+
+    // when clip boxes would overflow
+    ui_return_clip_boxes_arena_too_small,
 } ui_return_flag;
 
-// ui functions arguments
-typedef struct ui_args {
-    const ui_node* root;    // the node to begin measurement/rendering process in
+// Note: if using fresh non-static arena remember to 0-initialized it!
+// If arena does not have memory, (0, 0, 0), allocs new block of required size
+// Else reallocs old block into new one
+// Returns non zero at success, zero at failure
+int ui_arena_resize(ui_arena* target, size_t size, void*(*realloc_func)(void*, size_t));
 
-    int     resolution_x;   // screen resolution width
-    int     resolution_y;   // screen resolution height
-
-    char*   temp_memory;    // temporary memory for processes to use
-                            // carries results of measurement process to rendering
-                            // client is expected to alloc around 32 bytes per ui node
-                            // given to little memory does not cause memory errors - 
-                            // process will simply return error flag
-                            // upon so realloc and try again!
-                            
-    size_t  temp_capacity;  // temporary memory capacity
-
-    void*   user_context;   // user context
-                            // will be passed to injected functions
-} ui_args;
+// Frees arena memory
+// Makes target proper 0 initialized ui_arena
+void ui_arena_free(ui_arena* target, void(*free_func)(void*));
 
 // first step in rendering ui
 // computes desired resolution of each node
-ui_return_flag ui_measure(ui_args* a);
+ui_return_flag ui_measure(
+    const ui_node*  root,           // ui tree root
+    ui_arena*       temp_arena,     // temporary memory arena
+    void*           user_context    // will be passed to injected measure functions
+);
 
 // second step in rendering ui
 // renders the ui according to their desired resolutions
-ui_return_flag ui_render (ui_args* a);
+ui_return_flag ui_render(
+    const ui_node*  root,           // ui tree root
+    ui_arena*       temp_arena,     // temporary memory arena
+    int             resolution_x,   // screen resolution width
+    int             resolution_y,   // screen resolution height
+    ui_arena*       commands_arena, // arena for draw commands
+    ui_arena*       clipboxs_arena  // arena for clipboxes
+);
 
 // ===========================
-// Transformations Implemenations
+// Hex to Ui Color Implementations
+
+// convert single hex char to value at compile time
+#define UI_HEX_VAL(c) ( ((c) >= '0' && (c) <= '9') ? ((c)-'0') :    \
+                        ((c) >= 'a' && (c) <= 'f') ? ((c)-'a'+10) : \
+                        ((c) >= 'A' && (c) <= 'F') ? ((c)-'A'+10) : 0 )
+
+// convert two hex chars to byte at compile time
+#define UI_HEX_BYTE(c1, c2) ((UI_HEX_VAL(c1) << 4) | UI_HEX_VAL(c2))
+
+static inline ui_color ui_hex(const char* hex) {
+    ui_color result;
+    result.r = UI_HEX_BYTE(hex[1], hex[2]);
+    result.g = UI_HEX_BYTE(hex[3], hex[4]);
+    result.b = UI_HEX_BYTE(hex[5], hex[6]);
+
+    // if 8 digits after #, read alpha
+    if (hex[7] != '\0' && hex[8] != '\0') result.a = UI_HEX_BYTE(hex[7], hex[8]);
+    else result.a = 0xFF;
+
+    return result;
+}
+
+// compile time ui_color from hex builder
+// allows both lower and upper case letters
+// may include alpha (8 hex digits) or not (6 hex digits)
+// '#' prefix required
+#define UI_HEX(s) (ui_color){ \
+    UI_HEX_BYTE(s[1], s[2]), \
+    UI_HEX_BYTE(s[3], s[4]), \
+    UI_HEX_BYTE(s[5], s[6]), \
+    (sizeof(s) > 8 ? UI_HEX_BYTE(s[7], s[8]) : 0xFF) \
+}
+
+// ===========================
+// Transformations Implementations
 
 static inline ui_transform ui_trans(float dx, float dy, float sx, float sy, float deg_cw) {
     float rad = deg_cw * (3.14159265358979323846f / 180.0f);
@@ -436,17 +596,20 @@ static inline ui_transform ui_mul(ui_transform p, ui_transform c) {
 // Includes
 
 #include <setjmp.h>
+#include <stdalign.h>
 
 // ===========================
 // Node helpers
 
-static const unsigned char NODE_TYPE_NO_FLAG_MASK = (unsigned char)(ui_node_flag_data_instanced - 1);
+static const unsigned char NODE_TYPE_NO_FLAG_MASK = (unsigned char)(ui_node_flag_fill - 1);
 
 static inline int helper_is_single_childed(ui_node_type type) {
     type &= NODE_TYPE_NO_FLAG_MASK;
 
     switch (type) {
-    case ui_node_row: case ui_node_column: return 0;
+    case ui_node_row: 
+    case ui_node_column: 
+    return 0;
     }
 
     return 1;
@@ -468,6 +631,30 @@ static inline const ui_node_array helper_get_node_children_array(const ui_node* 
 }
 
 // ===========================
+// Arena helpers
+
+// Alloc block of arena memory after allocated block end
+// If arena proves to small, longjmps to given jmp buffer with given failure flag
+// Allocs aligned with max aligment
+static inline char* helper_arena_alloc(ui_arena* target, size_t bytes, jmp_buf* failure_jmp, ui_return_flag failure_flag) {
+    size_t alignment   = alignof(max_align_t);
+    size_t aligned_pos = ((target->position) + (alignment - 1)) & ~(alignment - 1);
+
+    if (bytes > target->capacity - aligned_pos) longjmp(*failure_jmp, failure_flag);
+
+    char* result = target->memory + aligned_pos;
+    target->position = aligned_pos + bytes;
+
+    return result;
+}
+
+// Undo all allocations till given position in arena
+static inline void helper_arena_roll_till(ui_arena* target, char* to_position) {
+    size_t temp_pos = to_position - target->memory;
+    target->position = temp_pos;
+}
+
+// ===========================
 // Maths helpers
 
 // max(a, b)
@@ -486,6 +673,27 @@ static inline float helper_lerp(float a, float b, float t) {
 }
 
 // ===========================
+// Arena
+
+int ui_arena_resize(ui_arena* target, size_t size, void*(*realloc_func)(void*, size_t)) {
+    char* new_memory = realloc_func(target->memory, size);
+    if (!new_memory) return 0; // realloc failure
+
+    target->memory   = new_memory;
+    target->position = target->position;
+    target->capacity = size;
+
+    return 1;
+}
+
+void ui_arena_free(ui_arena* target, void(*free_func)(void*)) {
+    free_func(target->memory);
+    target->memory   = 0x0;
+    target->position = 0;
+    target->capacity = 0;
+}
+
+// ===========================
 // Measuring
 
 typedef struct helper_measurement {
@@ -494,12 +702,17 @@ typedef struct helper_measurement {
 } helper_measurement;
 
 typedef struct helper_measurement_walk_context {
-    jmp_buf             ui_measure_call_frame;  // ui_measure call jmp buf, in case temp memory proves to small
-    const void*         instance;               // current subtree instance
-    size_t              last_used_index;        // see implementation note, also equal to count of measurements made, 
-                                                // used to keep track measurements array fill
-    helper_measurement* measurements;           // measurements write target
-    size_t              measurements_capacity;  // measurements capacity limit
+    jmp_buf             jmp_target;         // ui_measure call jmp buf, in case of error
+
+    size_t              last_used_index;    // see implementation note, also equal to count of measurements made, 
+                                            // used to keep track measurements array fill
+
+    helper_measurement* measurements;       // measurements array, dynamicaly expanding at the begining of temp_arena
+    ui_arena*           temp_arena;         // temporary arena, measurements write target
+
+    const void*         instance;           // current subtree instance
+
+    void*               user_context;       // user context to be passed to injected functions
 } helper_measurement_walk_context;
 
 // Function dispatching measuring based on node type
@@ -511,9 +724,9 @@ typedef struct helper_measurement_walk_context {
 // - cidx - first child index
 static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node* node, size_t idx);
 
-// See measure_copy_child_or_fill
+// See measure_copy_child
 // Exposed for ui_node_instance dispatch
-static inline void measure_copy_child_or_fill_given_child
+static inline void measure_copy_child_given_child
 (helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx, const ui_node* child) {
     helper_measurement* own = &mc->measurements[idx];
 
@@ -524,25 +737,25 @@ static inline void measure_copy_child_or_fill_given_child
     }
 
     *own = (helper_measurement){
-        .width  = {0, ui_inf_length, 1.0f},
-        .height = {0, ui_inf_length, 1.0f}
+        .width  = {0, 0, 0.0f},
+        .height = {0, 0, 0.0f}
     };
 }
 
 // Basic measure option for single childed nodes
 // If node have child, the parent node measurement is set to child's measurement
 // Else node's measurement is set to (ui_length){0, inf, 1.0f} in both axes
-static inline void measure_copy_child_or_fill(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
+static inline void measure_copy_child(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
     const ui_node* child = helper_get_node_single_child(node, mc->instance);
-    measure_copy_child_or_fill_given_child(mc, node, idx, cidx, child);
+    measure_copy_child_given_child(mc, node, idx, cidx, child);
 }
 
 // Measure option for ui_node_measure_transform in three steps:
-// - Measure child 'measure_copy_child_or_fill'
+// - Measure child 'measure_copy_child'
 // - Apply transform
 // - Find bounding box, and save it as own measurement
 static inline void measure_transform(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
-    measure_copy_child_or_fill(mc, node, idx, cidx);
+    measure_copy_child(mc, node, idx, cidx);
 
     const ui_transform_data* data = helper_get_data(node, mc->instance);
     helper_measurement* own = &mc->measurements[idx];
@@ -620,10 +833,10 @@ static inline void measure_transform(helper_measurement_walk_context* mc, const 
 }
 
 // Measure option for ui_node_padding in two steps:
-// - Measure children with 'measure_copy_child_or_fill'
+// - Measure children with 'measure_copy_child'
 // - Extend each axis by padding
 static inline void measure_padding(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
-    measure_copy_child_or_fill(mc, node, idx, cidx);
+    measure_copy_child(mc, node, idx, cidx);
 
     const ui_padding_data* data = helper_get_data(node, mc->instance);
     helper_measurement* own = &mc->measurements[idx];
@@ -639,10 +852,10 @@ static inline void measure_padding(helper_measurement_walk_context* mc, const ui
 }
 
 // Measure option for ui_node_sizebox in two steps:
-// - Measure children with 'measure_copy_child_or_fill'
+// - Measure children with 'measure_copy_child'
 // - Overwrite specified by data->flag fields with values from data
 static inline void measure_sizebox(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
-    measure_copy_child_or_fill(mc, node, idx, cidx);
+    measure_copy_child(mc, node, idx, cidx);
 
     const ui_sizebox_data* data = helper_get_data(node, mc->instance);
     helper_measurement*    own  = &mc->measurements[idx];
@@ -763,6 +976,54 @@ static inline void measure_column(helper_measurement_walk_context* mc, const ui_
     mc->measurements[idx] = own;
 }
 
+// Measure option for ui_node_sized_image
+// First measures subtree, then measures the image
+// In both axes:
+// min = max(subtree.min, image.min)
+// max = max(subtree.min, image.max)
+static inline void measure_sized_image(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
+    measure_copy_child(mc, node, idx, cidx);
+    helper_measurement* own = &mc->measurements[idx];
+
+    const ui_image_data* data = helper_get_data(node, mc->instance);
+    ui_length width, height; ui_injection_measure_sized_image(data, &width, &height, mc->user_context);
+
+    // lower limits
+    own->width.min  = helper_max(own->width.min, width.min);
+    own->height.min = helper_max(own->height.min, height.min);
+
+    // upper limits
+    own->width.max  = helper_max(own->width.min, width.max);
+    own->height.max = helper_max(own->height.min, height.max);
+
+    // do not flex
+    own->width.flex = 0.0f; own->height.flex = 0.0f;
+}
+
+// Measure option for ui_node_text
+// First measures subtree, then measures the text
+// In both axes:
+// min = max(subtree.min, text.min)
+// max = max(subtree.min, text.max)
+static inline void measure_text(helper_measurement_walk_context* mc, const ui_node* node, size_t idx, size_t cidx) {
+    measure_copy_child(mc, node, idx, cidx);
+    helper_measurement* own = &mc->measurements[idx];
+
+    const ui_text_data* data = helper_get_data(node, mc->instance);
+    ui_length width, height; ui_injection_measure_text(data, &width, &height, mc->user_context);
+
+    // lower limits
+    own->width.min  = helper_max(own->width.min, width.min);
+    own->height.min = helper_max(own->height.min, height.min);
+
+    // upper limits
+    own->width.max  = helper_max(own->width.min, width.max);
+    own->height.max = helper_max(own->height.min, height.max);
+
+    // do not flex
+    own->width.flex = 0.0f; own->height.flex = 0.0f;
+}
+
 static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node* node, size_t idx) {
     // allocate contiguous block of indices for own children
     size_t first_child_index = mc->last_used_index + 1;
@@ -771,10 +1032,8 @@ static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node*
     } 
     else mc->last_used_index += helper_get_node_children_array(node, mc->instance).count;
 
-    // check memory overflow
-    if (mc->last_used_index >= mc->measurements_capacity) {
-        longjmp(mc->ui_measure_call_frame, 1);
-    }
+    // alloc measurement memory for this node
+    helper_arena_alloc(mc->temp_arena, sizeof(helper_measurement), &mc->jmp_target, ui_return_temp_arena_too_small);
 
     // dispatch
     switch (node->type & NODE_TYPE_NO_FLAG_MASK) {
@@ -784,36 +1043,58 @@ static void measure_dispatch(helper_measurement_walk_context* mc, const ui_node*
 
         const void* old_instance = mc->instance;
         mc->instance = helper_get_data(node, mc->instance);
-        measure_copy_child_or_fill_given_child(mc, node, idx, first_child_index, child);
+        measure_copy_child_given_child(mc, node, idx, first_child_index, child);
         mc->instance = old_instance;
-    } return;
+    } break;
 
-    case ui_node_transform: measure_transform(mc, node, idx, first_child_index); return;
-    case ui_node_padding:   measure_padding(mc, node, idx, first_child_index); return;
-    case ui_node_sizebox:   measure_sizebox(mc, node, idx, first_child_index); return;
-    case ui_node_row:       measure_row    (mc, node, idx, first_child_index); return;
-    case ui_node_column:    measure_column (mc, node, idx, first_child_index); return;
-    }
+    case ui_node_transform:     measure_transform   (mc, node, idx, first_child_index); break;
+    case ui_node_padding:       measure_padding     (mc, node, idx, first_child_index); break;
+    case ui_node_sizebox:       measure_sizebox     (mc, node, idx, first_child_index); break;
+    case ui_node_row:           measure_row         (mc, node, idx, first_child_index); break;
+    case ui_node_column:        measure_column      (mc, node, idx, first_child_index); break;
+    case ui_node_sized_image:   measure_sized_image (mc, node, idx, first_child_index); break;
+    case ui_node_text:          measure_text        (mc, node, idx, first_child_index); break;
 
     // default dispatch case
-    measure_copy_child_or_fill(mc, node, idx, first_child_index);
+    default: measure_copy_child(mc, node, idx, first_child_index); break;
+    }
+
+    // if fill flag, overwrite maxes
+    if (node->type & ui_node_flag_fill) {
+        helper_measurement* own = &mc->measurements[idx];
+        own->width.max  = ui_inf_length;
+        own->width.flex = 1.0f;
+
+        own->height.max = ui_inf_length;
+        own->height.flex = 1.0f;
+    }
 }
 
-ui_return_flag ui_measure(ui_args* a) {
-    size_t* measurements_count = (size_t*)a->temp_memory;
+ui_return_flag ui_measure(
+    const ui_node*  root,
+    ui_arena*       temp_arena,
+    void*           user_context
+) {
+    // reset arena
+    temp_arena->position = 0;
 
     helper_measurement_walk_context mc = {
-        .instance               = 0x0,
         .last_used_index        = 0,
-        .measurements           = (helper_measurement*)(a->temp_memory + sizeof(size_t)),
-        .measurements_capacity  = (a->temp_capacity / sizeof(helper_measurement)),
+
+        .measurements           = (helper_measurement*)(temp_arena->memory),
+        .temp_arena             = temp_arena,
+
+        .instance               = 0x0,
+        .user_context           = user_context
     };
 
-    if (setjmp(mc.ui_measure_call_frame) == 0) measure_dispatch(&mc, a->root, 0);
-    else return ui_retrun_temp_to_small;
+    // be default returns 0 which is ui_return_ok
+    ui_return_flag flag = setjmp(mc.jmp_target);
 
-    *measurements_count = mc.last_used_index + 1;
-    return ui_return_ok;
+    // longjmp will not happen with ui_return_ok, therefore no loop in here
+    if (flag == ui_return_ok) measure_dispatch(&mc, root, 0);
+
+    return flag;
 }
 
 // ===========================
@@ -862,6 +1143,14 @@ static inline int helper_bound_length_in_parent(ui_length length, int parent_axi
     return result;
 }
 
+// Bounds given space inside given measurement
+static inline helper_transform_pack helper_limit_given_space_to_own_measurement
+(helper_transform_pack trs, helper_measurement measurement) {
+    int width  = helper_bound_length_in_parent(measurement.width,  trs.pixel_width);
+    int height = helper_bound_length_in_parent(measurement.height, trs.pixel_height);
+    trs = helper_scale_pack_to_dim(trs, width, height); return trs;
+}
+
 // Returns sum of width flexes of given node's children
 static inline float helper_children_flexsum_width
 (const helper_measurement* measurements, size_t child_count, const ui_node* children, size_t cidx) {
@@ -879,28 +1168,18 @@ static inline float helper_children_flexsum_height
 }
 
 typedef struct helper_rendering_walk_context {
-    jmp_buf                     ui_render_call_frame;   // ui_render call jmp buf, in case temp memory proves to small
-    const void*                 instance;               // current subtree instance
-    size_t                      last_used_index;        // see implementation note
-    const helper_measurement*   measurements;           // measurements read target
-    size_t                      temp_cap;               // temporary memory capacity
-    size_t                      temp_pos;               // temporary memory arena allocation position
-    char*                       temp_mem;               // temporary memory pointer
-    void*                       user_context;           // user context to be passed to injected functions
+    jmp_buf                     jmp_target;         // ui_render call jmp buf, in case of error
+
+    size_t                      last_used_index;    // see implementation note
+
+    const helper_measurement*   measurements;       // measurements read target
+    ui_arena*                   temp_arena;         // temporary arena
+    ui_arena*                   cmd_arena;          // arena for commands
+    ui_arena*                   clip_arena;         // arena for clipboxes
+
+    const void*                 instance;           // current subtree instance
+    ui_transform                current_clipbox;    // current clipbox
 } helper_rendering_walk_context;
-
-// Allocates first free given amount of bytes in temp memory
-// if it is not possilbe, longjmp to ui_render
-static inline char* helper_temp_mem_arena_alloc(helper_rendering_walk_context* rc, size_t bytes) {
-    if (rc->temp_pos + bytes >= rc->temp_cap) longjmp(rc->ui_render_call_frame, 1);
-    char* result = rc->temp_mem + rc->temp_pos; rc->temp_pos += bytes;
-    return result;
-}
-
-static inline void helper_temp_mem_arena_free(helper_rendering_walk_context* rc, char* to_position) {
-    size_t temp_pos = to_position - rc->temp_mem;
-    rc->temp_pos = temp_pos;
-}
 
 // Function dispatching rendering based on node type
 // - rc   - rendering walk context
@@ -1004,8 +1283,9 @@ static inline void render_row
         int  width;
     } slot;
 
-    slot* slots = (slot*)helper_temp_mem_arena_alloc(rc, children.count * sizeof(slot));
-    for (size_t i = 0; i < children.count; i++) slots[i] = (slot){0, 0};
+    slot* slots = (slot*)helper_arena_alloc(
+        rc->temp_arena, children.count * sizeof(slot), &rc->jmp_target, ui_return_temp_arena_too_small
+    ); for (size_t i = 0; i < children.count; i++) slots[i] = (slot){0, 0};
 
     // find number of spaces
     size_t spaces_count = children.count == 0 ? 0 : children.count - 1;
@@ -1127,7 +1407,7 @@ static inline void render_row
     }
 
     // free temporary memory
-    helper_temp_mem_arena_free(rc, (char*)slots);
+    helper_arena_roll_till(rc->temp_arena, (char*)slots);
 }
 
 // Render option for column
@@ -1149,8 +1429,9 @@ static inline void render_column
         int  height;
     } slot;
 
-    slot* slots = (slot*)helper_temp_mem_arena_alloc(rc, children.count * sizeof(slot));
-    for (size_t i = 0; i < children.count; i++) slots[i] = (slot){0, 0};
+    slot* slots = (slot*)helper_arena_alloc(
+        rc->temp_arena, children.count * sizeof(slot), &rc->jmp_target, ui_return_temp_arena_too_small
+    ); for (size_t i = 0; i < children.count; i++) slots[i] = (slot){0, 0};
 
     // find number of spaces
     size_t spaces_count = children.count == 0 ? 0 : children.count - 1;
@@ -1272,7 +1553,7 @@ static inline void render_column
     }
 
     // free temporary memory
-    helper_temp_mem_arena_free(rc, (char*)slots);
+    helper_arena_roll_till(rc->temp_arena, (char*)slots);
 }
 
 static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* node, size_t idx, helper_transform_pack trs) {
@@ -1298,6 +1579,18 @@ static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* no
         rc->instance = old_instance;
     } return;
 
+    // save current clipbox, overwrite, restore
+    case ui_node_clipbox: {
+        ui_transform old_clip = rc->current_clipbox;
+        rc->current_clipbox = trs.trans;
+
+        // recurse into subtree
+        const ui_node* child = helper_get_node_single_child(node, rc->instance);
+        if (child) render_dispatch(rc, child, first_child_index, trs);
+
+        rc->current_clipbox = old_clip;
+    } break;
+
     // transform matrix, then continue
     case ui_node_transform: {
         const ui_transform_data* data = helper_get_data(node, rc->instance);
@@ -1312,10 +1605,58 @@ static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* no
 
     // for primitves call injected methods
     case ui_node_box: {
-        ui_injection_render_box(
-            trs.trans, trs.pixel_width, trs.pixel_height, helper_get_data(node, rc->instance), rc->user_context
-        );
+        trs = helper_limit_given_space_to_own_measurement(trs, rc->measurements[idx]); // wrap to contents
+
+        ui_draw_command cmd = {
+            .type           = ui_draw_box,
+            .transform      = trs.trans,
+            .pixels_width   = trs.pixel_width,
+            .pixels_height  = trs.pixel_height,
+            .depth          = 0, // todo
+            .clipbox_index  = -1, // todo
+            .box_data       = *(const ui_box_data*)helper_get_data(node, rc->instance)
+        };
+
+        ui_draw_command* slot = (ui_draw_command*)helper_arena_alloc(
+            rc->cmd_arena, sizeof(ui_draw_command), &rc->jmp_target, ui_return_command_arena_too_small
+        ); *slot = cmd;
     } break;
+
+    case ui_node_image: case ui_node_sized_image: {
+        trs = helper_limit_given_space_to_own_measurement(trs, rc->measurements[idx]); // wrap to contents
+        
+        ui_draw_command cmd = {
+            .type           = ui_draw_image,
+            .transform      = trs.trans,
+            .pixels_width   = trs.pixel_width,
+            .pixels_height  = trs.pixel_height,
+            .depth          = 0, // todo
+            .clipbox_index  = -1, // todo
+            .image_data     = *(const ui_image_data*)helper_get_data(node, rc->instance)
+        };
+
+        ui_draw_command* slot = (ui_draw_command*)helper_arena_alloc(
+            rc->cmd_arena, sizeof(ui_draw_command), &rc->jmp_target, ui_return_command_arena_too_small
+        ); *slot = cmd;
+    } break;
+    
+    case ui_node_text: {
+        trs = helper_limit_given_space_to_own_measurement(trs, rc->measurements[idx]); // wrap to contents
+
+        ui_draw_command cmd = {
+            .type           = ui_draw_text,
+            .transform      = trs.trans,
+            .pixels_width   = trs.pixel_width,
+            .pixels_height  = trs.pixel_height,
+            .depth          = 0, // todo
+            .clipbox_index  = -1, // todo
+            .text_data      = *(const ui_text_data*)helper_get_data(node, rc->instance)
+        };
+
+        ui_draw_command* slot = (ui_draw_command*)helper_arena_alloc(
+            rc->cmd_arena, sizeof(ui_draw_command), &rc->jmp_target, ui_return_command_arena_too_small
+        ); *slot = cmd;
+    }
     }
 
     // by default recurse into subtree, without altering transform
@@ -1325,30 +1666,43 @@ static void render_dispatch(helper_rendering_walk_context* rc, const ui_node* no
     if (child) render_dispatch(rc, child, first_child_index, trs);
 }
 
-ui_return_flag ui_render(ui_args* a) {
+ui_return_flag ui_render(
+    const ui_node*  root,
+    ui_arena*       temp_arena,
+    int             resolution_x,
+    int             resolution_y,
+    ui_arena*       commands_arena,
+    ui_arena*       clipboxs_arena
+) {
+    // reset write target arenas
+    commands_arena->position = 0;
+    clipboxs_arena->position = 0;
+
     helper_transform_pack trs = {
         .trans        = ui_default_trans,
-        .pixel_width  = a->resolution_x,
-        .pixel_height = a->resolution_y
+        .pixel_width  = resolution_x,
+        .pixel_height = resolution_y
     };
-
-    size_t measurements_made = *(size_t*)(a->temp_memory);
-    size_t temp_pos = sizeof(size_t) + measurements_made * sizeof(helper_measurement);
 
     helper_rendering_walk_context rc = {
-        .instance        = 0x0,
         .last_used_index = 0,
-        .temp_cap        = a->temp_capacity,
-        .temp_pos        = temp_pos,
-        .temp_mem        = a->temp_memory,
-        .measurements    = (helper_measurement*)(a->temp_memory + sizeof(size_t)),
-        .user_context    = a->user_context
+
+        .measurements    = (helper_measurement*)(temp_arena->memory),
+        .temp_arena      = temp_arena,
+        .cmd_arena       = commands_arena,
+        .clip_arena      = clipboxs_arena,
+
+        .instance        = 0x0,
+        .current_clipbox = ui_default_trans,
     };
 
-    if (setjmp(rc.ui_render_call_frame) == 0) render_dispatch(&rc, a->root, 0, trs);
-    else return ui_retrun_temp_to_small;
+    // be default returns 0 which is ui_return_ok
+    ui_return_flag flag = setjmp(rc.jmp_target);
 
-    return ui_return_ok;
+    // longjmp will not happen with ui_return_ok, therefore no loop in here
+    if (flag == ui_return_ok) render_dispatch(&rc, root, 0, trs);
+
+    return flag;
 }
 
 #endif
